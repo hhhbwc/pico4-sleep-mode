@@ -8,11 +8,11 @@
         android:allowBackup="false"
         android:debuggable="false"
         android:hasCode="true"
-        android:label="PICO 4 Sleep Mode"
+        android:label="PICO 4 V-Sleep Mode"
         android:supportsRtl="true">
 
         <meta-data android:name="xposedmodule" android:value="true"/>
-        <meta-data android:name="xposeddescription" android:value="Adds a Sleep Mode toggle to the PICO 4 Dock quick panel: low eyebuffer, FFR, low brightness, powersave, and one-tap restore."/>
+        <meta-data android:name="xposeddescription" android:value="Adds a V-Sleep Mode toggle to the PICO 4 Dock quick panel: low eyebuffer, FFR, low brightness, powersave, and one-tap restore."/>
         <meta-data android:name="xposedminversion" android:value="82"/>
         <meta-data android:name="xposedscope" android:resource="@array/xposedscope"/>
 

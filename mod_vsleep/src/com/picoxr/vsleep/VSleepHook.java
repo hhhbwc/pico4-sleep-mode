@@ -225,7 +225,7 @@ public final class VSleepHook implements IXposedHookLoadPackage {
             if (button == null) return;
             boolean enabled = isEnabled(c);
             button.getClass().getMethod("h", boolean.class).invoke(button, enabled);
-            button.getClass().getMethod("setTipText", String.class).invoke(button, enabled ? "Sleep Mode 已开启" : "Sleep Mode");
+            button.getClass().getMethod("setTipText", String.class).invoke(button, enabled ? "V-Sleep Mode 已开启" : "V-Sleep Mode");
             Object image = findImageView(button);
             if (image == null) return;
             Object drawable = moduleDrawable(c);
