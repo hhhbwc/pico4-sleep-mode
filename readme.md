@@ -1,50 +1,52 @@
-# PICO 4 V-Sleep
+# PICO 4 Sleep Mode
 
-PICO 4 的 LSPosed 模块：把一个 V-Sleep 开关加入 Dock 右侧时间/电源入口打开的快捷设置面板。
+[中文](#中文) | [English](#english) | [Русский](#русский)
 
-## 起因
+---
 
-北京时间凌晨 4 点 20 分，我准备在 VRChat 里 V 睡。充电宝的充电功率干不过头显的耗电，电量越用越少；怒而写出这个模块 😡。现在写完了，准备 V 睡测试一下它到底有没有用。
+## 中文
+
+PICO 4 的 LSPosed 模块：把一个 V-Sleep 开关加入 Dock 右侧时间/电源入口打开的二级快捷设置面板。
+
+### 起因
+
+在北京时间凌晨 `04:20`，我准备在 VRChat 里 V 睡。充电宝的充电功率干不过头显的耗电，电量越用越少；怒而写出这个模块 😡。现在写完了，准备 V 睡测试一下它到底有没有用。
+
+当时世界各地的时间（除北京外均为前一天）：
+
+- 北京时间 CST (UTC+8)：`04:20`
+- 协调世界时 UTC：`20:20`（前一天）
+- 太平洋夏令时 PDT (UTC-7)：`13:20`（前一天）
+- 美东夏令时 EDT (UTC-4)：`16:20`（前一天）
+- 中欧夏令时 CEST (UTC+2)：`22:20`（前一天）
+- 莫斯科时间 MSK (UTC+3)：`23:20`（前一天）
 
 V-Sleep 指 VR 辅助睡眠场景，不是 Virtual Desktop 串流功能。
 
-## 已实现
+### 已实现
 
-- 在 PICO 系统的二级快捷设置面板加入 V-Sleep 快捷格。
-- 使用系统原生快捷格外观、焦点和开启状态边框。
-- 使用模块自带的 V-Sleep 图标，不修改系统 APK。
-- 一键开启低功耗模式：
-  - 眼缓冲分辨率：`1024 x 1024`
-  - 固定注视渲染（FFR）：开启
-  - 屏幕亮度：`1`
-  - CPU governor：`powersave`
+- 在 PICO 系统二级快捷设置面板加入 V-Sleep 快捷格，复用系统原生外观、焦点和开启状态边框。
+- 使用模块自带图标，不修改系统 APK。
+- 一键开启低功耗模式：眼缓冲 `1024 x 1024`、固定注视渲染（FFR）、亮度 `1`、CPU governor `powersave`。
 - 一键关闭并恢复开启前保存的眼缓冲、FFR、亮度和 CPU governor。
-- 实机完成连续开关测试；开启和恢复均有 LSPosed 日志记录。
+- 已在实机连续开关测试，开启与恢复均有 LSPosed 日志记录。
 
-## 当前限制
+### 当前限制与计划
 
-- 仅针对已 root、已安装 LSPosed / Zygisk-Vector 的 PICO 4 固件验证。
-- Hook 宿主为 `com.picovr.settings`；系统更新后内部类或方法变化可能导致失效。
-- 快捷格当前固定插入快捷栏首位。
-- 官方“设置 -> 通用 -> 快捷方式”中的添加、删除、拖拽排序暂不支持。该系统版本的编辑链路会因自定义资源 / RecyclerView ViewType 不兼容导致 Settings 崩溃，已主动禁用以保持主面板稳定。
+- 仅在已 root 且安装 LSPosed / Zygisk-Vector 的 PICO 4 上验证；系统更新可能改变 Hook 目标。
+- 快捷格当前固定在快捷栏第一位。
+- 官方“设置 -> 通用 -> 快捷方式”的添加、删除和拖拽排序暂不支持。该固件的编辑链路与自定义项目不兼容，曾导致 Settings 崩溃，现已禁用以优先保证稳定。
 - 不会关闭 6DoF 追踪，也没有防误触逻辑。
-- `powersave` 是否可用取决于设备内核提供的 governor；本模块在 PICO 4 上验证过。
+- 后续计划：可配置睡眠预设、兼容性诊断、长时间 VRChat V 睡的电量/温度/稳定性实测，以及固件兼容性矩阵。
 
-## 安装
+### 安装与验证
 
-1. 安装发行版提供的 `vsleep.apk`；自行构建时，APK 位于 `mod_vsleep/build/vsleep.apk`。
-2. 在 LSPosed / Zygisk-Vector 启用模块，作用域只选择：
-
-   ```text
-   com.picovr.settings
-   ```
-
+1. 安装 Release 提供的 `vsleep.apk`；自行构建时 APK 位于 `mod_vsleep/build/vsleep.apk`。
+2. 在 LSPosed / Zygisk-Vector 启用模块，作用域只选择 `com.picovr.settings`。
 3. 强制停止“设置”或重启头显。
-4. 点击 Dock 右侧的时间/电源区域，打开二级快捷设置面板；V-Sleep 位于底部快捷栏第一格。
+4. 点击 Dock 右侧时间/电源区域，V-Sleep 位于二级面板底部快捷栏第一格。
 
-## 使用与验证
-
-点击快捷格切换模式。开启后可用以下命令检查：
+开启后可检查：
 
 ```sh
 adb shell 'settings get global pico_vsleep_enabled'
@@ -52,37 +54,97 @@ adb shell su -c 'getprop persist.pvr.config.eyebuffer_width; getprop persist.pvr
 adb shell su -c 'for p in /sys/devices/system/cpu/cpufreq/policy*/scaling_governor; do printf "%s=" "$p"; cat "$p"; done'
 ```
 
-开启时预期为：`1`、`1024`、`1024`、`1`，各 CPU policy 为 `powersave`。关闭后应恢复开启前保存的值。
+预期依次为 `1`、`1024`、`1024`、`1`，各 CPU policy 为 `powersave`。关闭后应恢复原值。
 
-## 构建
+---
 
-源码位于 `mod_vsleep/`。当前使用 apktool + D8 的轻量构建流程，Windows 上可复用本项目工作区的构建脚本：
+## English
+
+An LSPosed module for PICO 4 that adds a V-Sleep toggle to the secondary Quick Settings panel opened from the Dock time/power area.
+
+### Why it exists
+
+At `04:20` Beijing time, I was about to V-sleep in VRChat. My power bank could not keep up with the headset's power draw, so the battery kept draining while charging. I got angry and wrote this module 😡. It is now finished, and I am about to V-sleep to find out whether it actually helps.
+
+The same moment in several time zones (all except Beijing were on the previous calendar day): CST `04:20`; UTC `20:20`; PDT `13:20`; EDT `16:20`; CEST `22:20`; MSK `23:20`.
+
+V-Sleep means VR-assisted sleep, not Virtual Desktop streaming.
+
+### Implemented
+
+- Native-looking V-Sleep Quick Settings tile with module-provided icon; no system APK modification.
+- One-tap sleep mode: `1024 x 1024` eye buffer, FFR enabled, brightness `1`, and `powersave` CPU governor.
+- One-tap restoration of the eye buffer, FFR, brightness, and CPU governor saved before activation.
+- Repeated on-device toggle testing completed, with LSPosed logs for both activation and restoration.
+
+### Limitations and roadmap
+
+- Tested only on rooted PICO 4 with LSPosed / Zygisk-Vector. Firmware updates can break the hooks.
+- The tile is currently fixed in the first Quick Settings slot.
+- The stock add/remove/reorder editor is disabled for now because this firmware's editor path crashes with custom items.
+- No 6DoF disabling and no accidental-touch prevention.
+- Planned: configurable presets, compatibility diagnostics, long VRChat V-sleep power/temperature/stability tests, and a firmware compatibility matrix.
+
+### Install
+
+1. Install `vsleep.apk` from Releases, or build `mod_vsleep/build/vsleep.apk` yourself.
+2. Enable the module in LSPosed / Zygisk-Vector, scoped only to `com.picovr.settings`.
+3. Force-stop Settings or reboot the headset.
+4. Open the Dock time/power panel. V-Sleep is the first tile in the lower Quick Settings row.
+
+---
+
+## Русский
+
+Модуль LSPosed для PICO 4: добавляет переключатель V-Sleep во вторичную панель быстрых настроек, которая открывается через область времени/питания в Dock.
+
+### Зачем он нужен
+
+В `04:20` по пекинскому времени я собирался спать в VRChat. Пауэрбанк не справлялся с энергопотреблением шлема, поэтому заряд продолжал уменьшаться даже во время зарядки. Я разозлился и написал этот модуль 😡. Теперь он готов, и я собираюсь проверить его во время V-sleep.
+
+В тот же момент время в разных зонах было таким (кроме Пекина, везде предыдущий календарный день): CST `04:20`; UTC `20:20`; PDT `13:20`; EDT `16:20`; CEST `22:20`; MSK `23:20`.
+
+V-Sleep означает сон с VR-помощью, а не стриминг Virtual Desktop.
+
+### Реализовано
+
+- Нативно выглядящая плитка V-Sleep в быстрых настройках с иконкой модуля, без изменения системного APK.
+- Режим низкого энергопотребления одним нажатием: буфер глаз `1024 x 1024`, FFR, яркость `1`, governor CPU `powersave`.
+- Восстановление ранее сохранённых буфера глаз, FFR, яркости и governor CPU одним нажатием.
+- Выполнены повторные тесты переключения на устройстве; активация и восстановление записываются в журналы LSPosed.
+
+### Ограничения и планы
+
+- Проверено только на PICO 4 с root и LSPosed / Zygisk-Vector; обновление прошивки может сломать Hook.
+- Плитка сейчас закреплена на первом месте ряда быстрых настроек.
+- Добавление, удаление и перетаскивание в штатном редакторе временно отключены: эта прошивка аварийно завершает Settings при пользовательских элементах.
+- Нет отключения 6DoF и защиты от случайных нажатий.
+- В планах: настраиваемые пресеты, диагностика совместимости, длительные тесты V-sleep в VRChat и таблица совместимости прошивок.
+
+### Установка
+
+1. Установите `vsleep.apk` из Releases или соберите `mod_vsleep/build/vsleep.apk` самостоятельно.
+2. Включите модуль в LSPosed / Zygisk-Vector только для `com.picovr.settings`.
+3. Принудительно остановите Settings или перезагрузите шлем.
+4. Откройте панель времени/питания в Dock. V-Sleep будет первой плиткой нижнего ряда быстрых настроек.
+
+---
+
+## Build
+
+Source lives in `mod_vsleep/`. The current lightweight Windows build uses apktool + D8:
 
 ```bat
 pico4\build_mod.bat ..\pico4-vsleep\mod_vsleep com\picoxr\vsleep vsleep
 ```
 
-构建需要：JDK 8+、Android D8 / R8、apktool，以及可用的 APK 签名证书。输出为：
+It requires JDK 8+, Android D8 / R8, apktool, and an APK signing certificate. `stub/` supplies compile-time Android/Xposed declarations only; LSPosed and Android provide their actual runtime implementations.
 
-```text
-mod_vsleep\build\vsleep.apk
-```
+## Risk
 
-`stub/` 仅用于编译期提供 Xposed 和 Android API 声明；运行时由 LSPosed 和系统框架提供实际实现。
+This module needs root and writes system properties, brightness settings, and CPU governor values. It reduces visual quality and performance, and cannot guarantee that every VRChat scene will consume less power than the charger supplies. Back up your device, monitor temperature, and use it at your own risk.
 
-## 计划 / 待实现
+## Credits
 
-- 在不触发系统编辑页崩溃的前提下，重新实现官方快捷方式编辑页的添加、删除和拖拽排序。
-- 做成可配置的睡眠预设，例如眼缓冲分辨率、亮度、FFR 与 CPU 策略。
-- 增加状态诊断与兼容性检查，明确提示系统版本或 governor 不支持的情况。
-- 长时间 VRChat V 睡实测：记录电量变化、温度、稳定性和恢复行为。
-- 为不同 PICO 固件版本整理兼容性矩阵。
-
-## 风险与免责
-
-该模块会写入系统属性、亮度设置和 CPU governor，需要 root。它会降低显示和性能质量，不保证降低总功耗足以抵消所有 VRChat 场景的耗电。请自行备份，确认设备温度和充电设备安全；使用风险自担。
-
-## 致谢
-
-- PICO 系统快捷设置实现提供了可复用的界面外壳。
-- LSPosed / Zygisk-Vector 提供 Hook 运行环境。
+- PICO Quick Settings implementation for the reusable visual shell.
+- LSPosed / Zygisk-Vector for the Hook runtime.
