@@ -10,16 +10,7 @@ PICO 4 的 LSPosed 模块：把一个 V-Sleep 开关加入 Dock 右侧时间/电
 
 ### 起因
 
-在北京时间凌晨 `04:20`，我准备在 VRChat 里 V 睡。充电宝的充电功率干不过头显的耗电，电量越用越少；怒而写出这个模块 😡。现在写完了，准备 V 睡测试一下它到底有没有用。
-
-当时世界各地的时间（除北京外均为前一天）：
-
-- 北京时间 CST (UTC+8)：`04:20`
-- 协调世界时 UTC：`20:20`（前一天）
-- 太平洋夏令时 PDT (UTC-7)：`13:20`（前一天）
-- 美东夏令时 EDT (UTC-4)：`16:20`（前一天）
-- 中欧夏令时 CEST (UTC+2)：`22:20`（前一天）
-- 莫斯科时间 MSK (UTC+3)：`23:20`（前一天）
+在北京时间 CST (UTC+8)：`04:20`，协调世界时 UTC：`20:20`，太平洋夏令时 PDT (UTC-7)：`13:20`，美东夏令时 EDT (UTC-4)：`16:20`，中欧夏令时 CEST (UTC+2)：`22:20`，莫斯科时间 MSK (UTC+3)：`23:20`，我准备在 VRChat 里 V 睡。充电宝的充电功率干不过头显的耗电，电量越用越少；怒而写出这个模块 😡。现在写完了，准备 V 睡测试一下它到底有没有用。
 
 V-Sleep 指 VR 辅助睡眠场景，不是 Virtual Desktop 串流功能。
 
@@ -64,9 +55,7 @@ An LSPosed module for PICO 4 that adds a V-Sleep toggle to the secondary Quick S
 
 ### Why it exists
 
-At `04:20` Beijing time, I was about to V-sleep in VRChat. My power bank could not keep up with the headset's power draw, so the battery kept draining while charging. I got angry and wrote this module 😡. It is now finished, and I am about to V-sleep to find out whether it actually helps.
-
-The same moment in several time zones (all except Beijing were on the previous calendar day): CST `04:20`; UTC `20:20`; PDT `13:20`; EDT `16:20`; CEST `22:20`; MSK `23:20`.
+At CST (UTC+8) `04:20`, UTC `20:20`, PDT (UTC-7) `13:20`, EDT (UTC-4) `16:20`, CEST (UTC+2) `22:20`, and MSK (UTC+3) `23:20`, I was about to V-sleep in VRChat. My power bank could not keep up with the headset's power draw, so the battery kept draining while charging. I got angry and wrote this module 😡. It is now finished, and I am about to V-sleep to find out whether it actually helps.
 
 V-Sleep means VR-assisted sleep, not Virtual Desktop streaming.
 
@@ -100,9 +89,7 @@ V-Sleep means VR-assisted sleep, not Virtual Desktop streaming.
 
 ### Зачем он нужен
 
-В `04:20` по пекинскому времени я собирался спать в VRChat. Пауэрбанк не справлялся с энергопотреблением шлема, поэтому заряд продолжал уменьшаться даже во время зарядки. Я разозлился и написал этот модуль 😡. Теперь он готов, и я собираюсь проверить его во время V-sleep.
-
-В тот же момент время в разных зонах было таким (кроме Пекина, везде предыдущий календарный день): CST `04:20`; UTC `20:20`; PDT `13:20`; EDT `16:20`; CEST `22:20`; MSK `23:20`.
+В CST (UTC+8) `04:20`, UTC `20:20`, PDT (UTC-7) `13:20`, EDT (UTC-4) `16:20`, CEST (UTC+2) `22:20` и MSK (UTC+3) `23:20` я собирался спать в VRChat. Пауэрбанк не справлялся с энергопотреблением шлема, поэтому заряд продолжал уменьшаться даже во время зарядки. Я разозлился и написал этот модуль 😡. Теперь он готов, и я собираюсь проверить его во время V-sleep.
 
 V-Sleep означает сон с VR-помощью, а не стриминг Virtual Desktop.
 
