@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The panel opened from Dock's time block. -->
+    <string-array name="xposedscope">
+        <item>com.picovr.settings</item>
+    </string-array>
+</resources>

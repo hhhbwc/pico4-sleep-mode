@@ -1,0 +1,16 @@
+# Generated Android / apktool outputs
+mod_vsleep/build/
+mod_vsleep/classes.dex
+
+# Local signing material and reverse-engineering workspace
+*.keystore
+*.jks
+*.p12
+*.pem
+work/
+
+# IDE and operating-system files
+.idea/
+*.iml
+Thumbs.db
+Desktop.ini
