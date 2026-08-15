@@ -13,7 +13,7 @@ PICO 4 的 LSPosed 模块：把一个 V-Sleep Mode 开关加入 Dock 右侧时�
 在北京时间 CST (UTC+8)：`2026-08-15 04:20`，协调世界时 UTC：`2026-08-14 20:20`，<br>
 太平洋夏令时 PDT (UTC-7)：`2026-08-14 13:20`，美东夏令时 EDT (UTC-4)：`2026-08-14 16:20`，<br>
 中欧夏令时 CEST (UTC+2)：`2026-08-14 22:20`，莫斯科时间 MSK (UTC+3)：`2026-08-14 23:20`，<br>
-我准备在 VRChat 里 V 睡。充电宝的充电功率干不过头显的耗电，电量越用越少；怒而写出这个模块 😡。现在写完了，准备测试一下这个 ~~V-Sleep Mode 到底有没有用~~，经过测试有效。
+我准备在 VRChat 里 V 睡。充电宝的充电功率干不过头显的耗电，电量越用越少；怒而写出这个模块 😡。~~现在写完了，准备测试一下这个 V-Sleep Mode 到底有没有用。~~经过测试有效。
 
 
 ### 已实现
@@ -60,7 +60,7 @@ An LSPosed module for PICO 4 that adds a V-Sleep Mode toggle to the secondary Qu
 At CST (UTC+8) `2026-08-15 04:20` and UTC `2026-08-14 20:20`,<br>
 PDT (UTC-7) `2026-08-14 13:20` and EDT (UTC-4) `2026-08-14 16:20`,<br>
 CEST (UTC+2) `2026-08-14 22:20` and MSK (UTC+3) `2026-08-14 23:20`,<br>
-I was about to V-sleep in VRChat. My power bank could not keep up with the headset's power draw, so the battery kept draining while charging. I got angry and wrote this module 😡. It is now finished, and I am about to test whether this ~~V-Sleep Mode actually helps~~; tested and confirmed.
+I was about to V-sleep in VRChat. My power bank could not keep up with the headset's power draw, so the battery kept draining while charging. I got angry and wrote this module 😡. ~~It is now finished, and I am about to test whether this V-Sleep Mode actually helps.~~ tested and confirmed.
 
 ### Implemented
 
@@ -95,7 +95,7 @@ I was about to V-sleep in VRChat. My power bank could not keep up with the heads
 В CST (UTC+8) `2026-08-15 04:20` и UTC `2026-08-14 20:20`,<br>
 PDT (UTC-7) `2026-08-14 13:20` и EDT (UTC-4) `2026-08-14 16:20`,<br>
 CEST (UTC+2) `2026-08-14 22:20` и MSK (UTC+3) `2026-08-14 23:20`,<br>
-я собирался V-спать в VRChat. Пауэрбанк не справлялся с энергопотреблением шлема, поэтому заряд продолжал уменьшаться даже во время зарядки. Я разозлился и написал этот модуль 😡. Теперь он готов, и я собираюсь проверить, действительно ли помогает этот ~~V-Sleep Mode~~; проверено и подтверждено.
+я собирался V-спать в VRChat. Пауэрбанк не справлялся с энергопотреблением шлема, поэтому заряд продолжал уменьшаться даже во время зарядки. Я разозлился и написал этот модуль 😡. ~~Теперь он готов, и я собираюсь проверить, действительно ли помогает этот V-Sleep Mode.~~ проверено и подтверждено.
 
 ### Реализовано
 
