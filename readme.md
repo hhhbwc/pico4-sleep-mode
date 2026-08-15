@@ -60,7 +60,7 @@ An LSPosed module for PICO 4 that adds a V-Sleep Mode toggle to the secondary Qu
 At CST (UTC+8) `2026-08-15 04:20` and UTC `2026-08-14 20:20`,<br>
 PDT (UTC-7) `2026-08-14 13:20` and EDT (UTC-4) `2026-08-14 16:20`,<br>
 CEST (UTC+2) `2026-08-14 22:20` and MSK (UTC+3) `2026-08-14 23:20`,<br>
-I was about to V-sleep in VRChat. My power bank could not keep up with the headset's power draw, so the battery kept draining while charging. I got angry and wrote this module 😡. It is now finished, and I am about to test whether V-Sleep Mode actually helps.
+I was about to V-sleep in VRChat. My power bank could not keep up with the headset's power draw, so the battery kept draining while charging. I got angry and wrote this module 😡. It is now finished, and I am about to test whether this V-Sleep Mode actually helps; tested and confirmed.
 
 ### Implemented
 
@@ -95,7 +95,7 @@ I was about to V-sleep in VRChat. My power bank could not keep up with the heads
 В CST (UTC+8) `2026-08-15 04:20` и UTC `2026-08-14 20:20`,<br>
 PDT (UTC-7) `2026-08-14 13:20` и EDT (UTC-4) `2026-08-14 16:20`,<br>
 CEST (UTC+2) `2026-08-14 22:20` и MSK (UTC+3) `2026-08-14 23:20`,<br>
-я собирался V-спать в VRChat. Пауэрбанк не справлялся с энергопотреблением шлема, поэтому заряд продолжал уменьшаться даже во время зарядки. Я разозлился и написал этот модуль 😡. Теперь он готов, и я собираюсь проверить, действительно ли помогает V-Sleep Mode.
+я собирался V-спать в VRChat. Пауэрбанк не справлялся с энергопотреблением шлема, поэтому заряд продолжал уменьшаться даже во время зарядки. Я разозлился и написал этот модуль 😡. Теперь он готов, и я собираюсь проверить, действительно ли помогает этот V-Sleep Mode; проверено и подтверждено.
 
 ### Реализовано
 
