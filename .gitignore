@@ -9,6 +9,13 @@ mod_vsleep/classes.dex
 *.pem
 work/
 
+# Local device verification artifacts
+device-vsleep-base.apk
+pico-screen.png
+pico-ui.xml
+quick-panel.png
+quick-ui.xml
+
 # IDE and operating-system files
 .idea/
 *.iml
