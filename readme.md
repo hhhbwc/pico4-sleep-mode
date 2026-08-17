@@ -39,15 +39,17 @@ PICO 4 的 LSPosed 模块：把一个 V-Sleep Mode 开关加入 Dock 右侧时�
 3. 强制停止“设置”或重启头显。
 4. 点击 Dock 右侧时间/电源区域，V-Sleep Mode 位于二级面板底部快捷栏第一格。
 
-开启后可检查：
+开启前先记录当前值，开启和关闭后均可检查：
 
 ```sh
-adb shell 'settings get global pico_vsleep_enabled'
-adb shell su -c 'getprop persist.pvr.config.eyebuffer_width; getprop persist.pvr.config.eyebuffer_height; getprop persist.pvr.config.ffr'
+adb shell 'settings get global pico_vsleep_enabled; settings get global pico_vsleep_snapshot_valid; settings get system screen_brightness'
+adb shell su -c 'getprop persist.pvr.config.eyebuffer_width; getprop persist.pvr.config.eyebuffer_height; getprop persist.pvr.config.ffr; getprop persist.pvr.config.target_fps'
 adb shell su -c 'for p in /sys/devices/system/cpu/cpufreq/policy*/scaling_governor; do printf "%s=" "$p"; cat "$p"; done'
 ```
 
-预期依次为 `1`、`1024`、`1024`、`1`，各 CPU policy 为 `powersave`。关闭后应恢复原值。
+开启后预期依次为模式标记 `1`、快照标记 `1`、亮度 `1`、眼缓冲 `1024`、`1024`、FFR `1`，各 CPU policy 为 `powersave`。关闭后模式和快照标记均应为 `0`，其余值必须逐项恢复为开启前记录的值。
+
+模块会在任何低功耗写入前保存并验证完整快照。任一写入或 CPU policy 回验失败时，不会提交开启状态，并会尝试回滚。旧版本遗留的单一 governor 备份会在首次关闭时迁移到当前全部 CPU policy；若没有完整备份，模块会拒绝猜测默认值并在 LSPosed 日志中报告原因。
 
 ---
 
@@ -83,6 +85,18 @@ I was about to V-sleep in VRChat. My power bank could not keep up with the heads
 2. Enable the module in LSPosed / Zygisk-Vector, scoped only to `com.picovr.settings`.
 3. Force-stop Settings or reboot the headset.
 4. Open the Dock time/power panel. V-Sleep Mode is the first tile in the lower Quick Settings row.
+
+Before enabling, record the current values. Check after enabling and disabling:
+
+```sh
+adb shell 'settings get global pico_vsleep_enabled; settings get global pico_vsleep_snapshot_valid; settings get system screen_brightness'
+adb shell su -c 'getprop persist.pvr.config.eyebuffer_width; getprop persist.pvr.config.eyebuffer_height; getprop persist.pvr.config.ffr; getprop persist.pvr.config.target_fps'
+adb shell su -c 'for p in /sys/devices/system/cpu/cpufreq/policy*/scaling_governor; do printf "%s=" "$p"; cat "$p"; done'
+```
+
+After enabling, the mode and snapshot flags should both be `1`, brightness should be `1`, eye-buffer dimensions should be `1024`, FFR should be `1`, and every CPU policy should be `powersave`. After disabling, both flags should be `0` and every other value must match its recorded pre-enable value.
+
+The module saves and verifies a complete snapshot before changing power settings. A failed write or governor verification does not commit the enabled state and triggers a rollback attempt. A legacy single-governor backup is migrated across the currently available policies the first time it is disabled; without a complete backup, the module refuses to invent restoration defaults and logs the reason to LSPosed.
 
 ---
 

@@ -8,7 +8,9 @@ import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -26,6 +28,9 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static final String TILE_ADDED_KEY = "pico_vsleep_quick_added";
     private static final String TILE_INDEX_KEY = "pico_vsleep_quick_index";
     private static final String SAVED_PREFIX = "pico_vsleep_saved_";
+    private static final String SNAPSHOT_KEY = "pico_vsleep_snapshot_valid";
+    private static final String GOVERNOR_PREFIX = "governor_";
+    private static final String CPU_POLICY_PATH = "/sys/devices/system/cpu/cpufreq";
     private static final String PROP_EYEBUFFER_W = "persist.pvr.config.eyebuffer_width";
     private static final String PROP_EYEBUFFER_H = "persist.pvr.config.eyebuffer_height";
     private static final String PROP_FFR = "persist.pvr.config.ffr";
@@ -49,7 +54,7 @@ public final class VSleepHook implements IXposedHookLoadPackage {
             });
             XposedHelpers.findAndHookMethod(adapter, "onBindViewHolder", Class.forName("androidx.recyclerview.widget.RecyclerView$ViewHolder", false, lp.classLoader), int.class, new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam p) { mapSleepTypeForBind(p.thisObject, ((Integer) p.args[1]).intValue()); }
-                @Override protected void afterHookedMethod(MethodHookParam p) { configureSleepButton(p.thisObject, p.args[0], ((Integer) p.args[1]).intValue()); }
+                @Override protected void afterHookedMethod(MethodHookParam p) { int position = ((Integer) p.args[1]).intValue(); configureSleepButton(p.thisObject, p.args[0], position); restoreSleepTypeAfterBind(p.thisObject, position); }
             });
             XposedHelpers.findAndHookMethod(adapter, "b", ArrayList.class, new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam p) { removeDuplicateTile((ArrayList) p.args[0]); }
@@ -148,7 +153,7 @@ public final class VSleepHook implements IXposedHookLoadPackage {
             Object listener = Proxy.newProxyInstance(cl, new Class<?>[]{listenerClass}, new InvocationHandler() {
                 @Override public Object invoke(Object proxy, Method method, Object[] args) {
                     if ("onClick".equals(method.getName())) {
-                        if (isEnabled(context)) disable(context); else enable(context);
+                        if (isEnabled(context) || hasSnapshot(context)) disable(context); else enable(context);
                         refreshTile(context);
                     }
                     return null;
@@ -163,12 +168,14 @@ public final class VSleepHook implements IXposedHookLoadPackage {
         } catch (Throwable t) { XposedBridge.log(TAG + ": quick tile configuration failed: " + t); }
     }
 
-    private static void mapSleepTypeForBind(Object adapter, int position) {
+    private static void mapSleepTypeForBind(Object adapter, int position) { setSleepType(adapter, position, V_SLEEP_TILE, 1); }
+    private static void restoreSleepTypeAfterBind(Object adapter, int position) { setSleepType(adapter, position, 1, V_SLEEP_TILE); }
+    private static void setSleepType(Object adapter, int position, int expected, int replacement) {
         try {
             if (position != 0) return;
             java.lang.reflect.Field data = adapter.getClass().getDeclaredField("a"); data.setAccessible(true);
             Object info = ((List) data.get(adapter)).get(position);
-            if (((Integer) info.getClass().getMethod("f").invoke(info)).intValue() == V_SLEEP_TILE) info.getClass().getMethod("m", int.class).invoke(info, 1);
+            if (((Integer) info.getClass().getMethod("f").invoke(info)).intValue() == expected) info.getClass().getMethod("m", int.class).invoke(info, replacement);
         } catch (Throwable t) { XposedBridge.log(TAG + ": tile bind mapping failed: " + t); }
     }
 
@@ -254,36 +261,175 @@ public final class VSleepHook implements IXposedHookLoadPackage {
         return null;
     }
     private static boolean isEnabled(Object c) { return getGlobalInt(c, MODE_KEY, 0) == 1; }
+    private static boolean hasSnapshot(Object c) { return getGlobalInt(c, SNAPSHOT_KEY, 0) == 1; }
 
     private static synchronized void enable(Object c) {
         if (isEnabled(c)) return;
-        save(c, "eyebuffer_w", getProp(PROP_EYEBUFFER_W, "1504")); save(c, "eyebuffer_h", getProp(PROP_EYEBUFFER_H, "1504"));
-        save(c, "ffr", getProp(PROP_FFR, "0")); save(c, "fps", getProp(PROP_FPS, ""));
-        save(c, "brightness", String.valueOf(getSystemInt(c, "screen_brightness", 128))); save(c, "governor", getGovernor());
-        setProp(PROP_EYEBUFFER_W, String.valueOf(SLEEP_EYEBUFFER)); setProp(PROP_EYEBUFFER_H, String.valueOf(SLEEP_EYEBUFFER));
-        setProp(PROP_FFR, "1"); putSystemInt(c, "screen_brightness", 1); setGovernor("powersave"); putGlobalInt(c, MODE_KEY, 1);
+        if (hasSnapshot(c)) {
+            XposedBridge.log(TAG + ": refusing enable while a previous snapshot needs restoration");
+            return;
+        }
+        Snapshot snapshot = captureSnapshot(c);
+        if (snapshot == null || !saveSnapshot(c, snapshot)) {
+            XposedBridge.log(TAG + ": V-Sleep enable aborted: could not create a complete snapshot");
+            return;
+        }
+        boolean applied = applySleepState(c, snapshot.governors);
+        if (!applied) {
+            XposedBridge.log(TAG + ": V-Sleep enable failed; restoring captured state");
+            if (restoreSnapshot(c, snapshot)) clearSnapshot(c);
+            return;
+        }
+        if (!putGlobalInt(c, MODE_KEY, 1)) {
+            XposedBridge.log(TAG + ": V-Sleep enable failed to commit state; restoring captured state");
+            if (restoreSnapshot(c, snapshot)) clearSnapshot(c);
+            return;
+        }
         XposedBridge.log(TAG + ": V-Sleep enabled");
     }
+
     private static synchronized void disable(Object c) {
-        if (!isEnabled(c)) return;
-        setProp(PROP_EYEBUFFER_W, saved(c, "eyebuffer_w", "1504")); setProp(PROP_EYEBUFFER_H, saved(c, "eyebuffer_h", "1504"));
-        setProp(PROP_FFR, saved(c, "ffr", "0")); String fps = saved(c, "fps", ""); if (fps.length() > 0) setProp(PROP_FPS, fps);
-        putSystemInt(c, "screen_brightness", parseInt(saved(c, "brightness", "128"), 128)); String gov = saved(c, "governor", ""); if (gov.length() > 0) setGovernor(gov);
-        putGlobalInt(c, MODE_KEY, 0); XposedBridge.log(TAG + ": V-Sleep disabled and state restored");
+        if (!hasSnapshot(c) && !migrateLegacySnapshot(c)) {
+            XposedBridge.log(TAG + ": V-Sleep disable aborted: no valid snapshot is available");
+            return;
+        }
+        Snapshot snapshot = readSnapshot(c);
+        if (snapshot == null) {
+            XposedBridge.log(TAG + ": V-Sleep disable aborted: snapshot is incomplete");
+            return;
+        }
+        if (!restoreSnapshot(c, snapshot)) {
+            XposedBridge.log(TAG + ": V-Sleep restore failed; keeping snapshot for retry");
+            return;
+        }
+        if (!putGlobalInt(c, MODE_KEY, 0) || !clearSnapshot(c)) {
+            XposedBridge.log(TAG + ": V-Sleep restore completed but state cleanup failed");
+            return;
+        }
+        XposedBridge.log(TAG + ": V-Sleep disabled and state restored");
     }
 
-    private static String getProp(String k, String d) { try { return (String) Class.forName("android.os.SystemProperties").getMethod("get", String.class, String.class).invoke(null, k, d); } catch (Throwable t) { return d; } }
-    private static void setProp(String k, String v) { try { Class.forName("android.os.SystemProperties").getMethod("set", String.class, String.class).invoke(null, k, v); } catch (Throwable t) { XposedBridge.log(TAG + ": cannot set " + k + ": " + t); } }
+    private static boolean migrateLegacySnapshot(Object c) {
+        if (!isEnabled(c)) return false;
+        String width = saved(c, "eyebuffer_w"); String height = saved(c, "eyebuffer_h"); String ffr = saved(c, "ffr"); String fps = saved(c, "fps");
+        int brightness = parseInt(saved(c, "brightness"), -1); String governor = saved(c, "governor"); Map current = readGovernors();
+        if (isEmpty(width) || isEmpty(height) || isEmpty(ffr) || brightness < 0 || !validGovernor(governor) || current.isEmpty()) return false;
+        Snapshot legacy = new Snapshot(width, height, ffr, fps == null ? "" : fps, brightness, governorsWithValue(current, governor));
+        boolean migrated = saveSnapshot(c, legacy);
+        if (migrated) XposedBridge.log(TAG + ": migrated legacy V-Sleep snapshot for " + current.size() + " CPU policies");
+        return migrated;
+    }
+
+    private static Snapshot captureSnapshot(Object c) {
+        String width = getProp(PROP_EYEBUFFER_W); String height = getProp(PROP_EYEBUFFER_H); String ffr = getProp(PROP_FFR); String fps = getProp(PROP_FPS);
+        int brightness = getSystemInt(c, "screen_brightness", -1); Map governors = readGovernors();
+        if (isEmpty(width) || isEmpty(height) || isEmpty(ffr) || brightness < 0 || governors.isEmpty()) {
+            XposedBridge.log(TAG + ": invalid snapshot width=" + width + " height=" + height + " ffr=" + ffr + " brightness=" + brightness + " governors=" + governors.size());
+            return null;
+        }
+        return new Snapshot(width, height, ffr, fps, brightness, governors);
+    }
+
+    private static boolean saveSnapshot(Object c, Snapshot s) {
+        boolean saved = save(c, "eyebuffer_w", s.width); saved = save(c, "eyebuffer_h", s.height) && saved;
+        saved = save(c, "ffr", s.ffr) && saved; saved = save(c, "fps", s.fps) && saved;
+        saved = save(c, "brightness", String.valueOf(s.brightness)) && saved;
+        for (Object entryObject : s.governors.entrySet()) {
+            Map.Entry entry = (Map.Entry) entryObject;
+            saved = save(c, GOVERNOR_PREFIX + entry.getKey(), (String) entry.getValue()) && saved;
+        }
+        return saved && putGlobalInt(c, SNAPSHOT_KEY, 1);
+    }
+
+    private static Snapshot readSnapshot(Object c) {
+        String width = saved(c, "eyebuffer_w"); String height = saved(c, "eyebuffer_h"); String ffr = saved(c, "ffr"); String fps = saved(c, "fps");
+        int brightness = parseInt(saved(c, "brightness"), -1); Map governors = readSavedGovernors(c);
+        if (isEmpty(width) || isEmpty(height) || isEmpty(ffr) || brightness < 0 || governors.isEmpty()) return null;
+        return new Snapshot(width, height, ffr, fps == null ? "" : fps, brightness, governors);
+    }
+
+    private static boolean applySleepState(Object c, Map originalGovernors) {
+        boolean applied = setProp(PROP_EYEBUFFER_W, String.valueOf(SLEEP_EYEBUFFER));
+        applied = setProp(PROP_EYEBUFFER_H, String.valueOf(SLEEP_EYEBUFFER)) && applied;
+        applied = setProp(PROP_FFR, "1") && applied;
+        applied = putSystemInt(c, "screen_brightness", 1) && applied;
+        return setGovernors(governorsWithValue(originalGovernors, "powersave")) && applied;
+    }
+
+    private static boolean restoreSnapshot(Object c, Snapshot s) {
+        boolean restored = setProp(PROP_EYEBUFFER_W, s.width); restored = setProp(PROP_EYEBUFFER_H, s.height) && restored;
+        restored = setProp(PROP_FFR, s.ffr) && restored;
+        if (s.fps.length() > 0) restored = setProp(PROP_FPS, s.fps) && restored;
+        restored = putSystemInt(c, "screen_brightness", s.brightness) && restored;
+        return setGovernors(s.governors) && restored;
+    }
+
+    private static boolean clearSnapshot(Object c) { return putGlobalInt(c, SNAPSHOT_KEY, 0); }
+    private static boolean isEmpty(String value) { return value == null || value.length() == 0; }
+
+    private static final class Snapshot {
+        final String width, height, ffr, fps;
+        final int brightness;
+        final Map governors;
+        Snapshot(String width, String height, String ffr, String fps, int brightness, Map governors) {
+            this.width = width; this.height = height; this.ffr = ffr; this.fps = fps; this.brightness = brightness; this.governors = governors;
+        }
+    }
+
+    private static String getProp(String k) { try { return (String) Class.forName("android.os.SystemProperties").getMethod("get", String.class).invoke(null, k); } catch (Throwable t) { XposedBridge.log(TAG + ": cannot read " + k + ": " + t); return null; } }
+    private static boolean setProp(String k, String v) {
+        try {
+            Class.forName("android.os.SystemProperties").getMethod("set", String.class, String.class).invoke(null, k, v);
+            if (v.equals(getProp(k))) return true;
+            XposedBridge.log(TAG + ": property write verification failed " + k + "=" + v);
+        } catch (Throwable t) { XposedBridge.log(TAG + ": cannot set " + k + ": " + t); }
+        return false;
+    }
     private static Object resolver(Object c) throws Exception { return c.getClass().getMethod("getContentResolver").invoke(c); }
     private static int getGlobalInt(Object c, String k, int d) { return getInt("android.provider.Settings$Global", c, k, d); }
     private static int getSystemInt(Object c, String k, int d) { return getInt("android.provider.Settings$System", c, k, d); }
-    private static int getInt(String cls, Object c, String k, int d) { try { return ((Integer) Class.forName(cls).getMethod("getInt", Class.forName("android.content.ContentResolver"), String.class, int.class).invoke(null, resolver(c), k, d)).intValue(); } catch (Throwable t) { return d; } }
-    private static void putGlobalInt(Object c, String k, int v) { putInt("android.provider.Settings$Global", c, k, v); }
-    private static void putSystemInt(Object c, String k, int v) { putInt("android.provider.Settings$System", c, k, v); }
-    private static void putInt(String cls, Object c, String k, int v) { try { Class.forName(cls).getMethod("putInt", Class.forName("android.content.ContentResolver"), String.class, int.class).invoke(null, resolver(c), k, v); } catch (Throwable t) { XposedBridge.log(TAG + ": setting write failed " + k + ": " + t); } }
-    private static void save(Object c, String s, String v) { try { Class.forName("android.provider.Settings$Global").getMethod("putString", Class.forName("android.content.ContentResolver"), String.class, String.class).invoke(null, resolver(c), SAVED_PREFIX + s, v); } catch (Throwable t) { XposedBridge.log(TAG + ": save failed " + s + ": " + t); } }
-    private static String saved(Object c, String s, String d) { try { Object v = Class.forName("android.provider.Settings$Global").getMethod("getString", Class.forName("android.content.ContentResolver"), String.class).invoke(null, resolver(c), SAVED_PREFIX + s); return v == null ? d : (String) v; } catch (Throwable t) { return d; } }
+    private static int getInt(String cls, Object c, String k, int d) { try { return ((Integer) Class.forName(cls).getMethod("getInt", Class.forName("android.content.ContentResolver"), String.class, int.class).invoke(null, resolver(c), k, d)).intValue(); } catch (Throwable t) { XposedBridge.log(TAG + ": setting read failed " + k + ": " + t); return d; } }
+    private static boolean putGlobalInt(Object c, String k, int v) { return putInt("android.provider.Settings$Global", c, k, v); }
+    private static boolean putSystemInt(Object c, String k, int v) { return putInt("android.provider.Settings$System", c, k, v); }
+    private static boolean putInt(String cls, Object c, String k, int v) { try { Boolean written = (Boolean) Class.forName(cls).getMethod("putInt", Class.forName("android.content.ContentResolver"), String.class, int.class).invoke(null, resolver(c), k, v); if (written.booleanValue() && getInt(cls, c, k, Integer.MIN_VALUE) == v) return true; XposedBridge.log(TAG + ": setting write verification failed " + k + "=" + v); } catch (Throwable t) { XposedBridge.log(TAG + ": setting write failed " + k + ": " + t); } return false; }
+    private static boolean save(Object c, String s, String v) { try { Boolean written = (Boolean) Class.forName("android.provider.Settings$Global").getMethod("putString", Class.forName("android.content.ContentResolver"), String.class, String.class).invoke(null, resolver(c), SAVED_PREFIX + s, v); if (written.booleanValue() && v.equals(saved(c, s))) return true; XposedBridge.log(TAG + ": save verification failed " + s); } catch (Throwable t) { XposedBridge.log(TAG + ": save failed " + s + ": " + t); } return false; }
+    private static String saved(Object c, String s) { try { return (String) Class.forName("android.provider.Settings$Global").getMethod("getString", Class.forName("android.content.ContentResolver"), String.class).invoke(null, resolver(c), SAVED_PREFIX + s); } catch (Throwable t) { XposedBridge.log(TAG + ": saved value read failed " + s + ": " + t); return null; } }
     private static int parseInt(String v, int d) { try { return Integer.parseInt(v); } catch (Throwable t) { return d; } }
-    private static String getGovernor() { try { return new String(java.nio.file.Files.readAllBytes(new File("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor").toPath())).trim(); } catch (Throwable t) { return ""; } }
-    private static void setGovernor(String g) { try { Runtime.getRuntime().exec(new String[]{"su", "-c", "for p in /sys/devices/system/cpu/cpufreq/policy*/scaling_governor; do echo " + g + " > $p; done"}).waitFor(); } catch (Throwable t) { XposedBridge.log(TAG + ": governor failed: " + t); } }
+
+    private static Map readGovernors() {
+        Map governors = new HashMap(); File[] policies = new File(CPU_POLICY_PATH).listFiles();
+        if (policies == null) return governors;
+        for (int i = 0; i < policies.length; i++) {
+            File governor = new File(policies[i], "scaling_governor");
+            if (!governor.isFile()) continue;
+            try { String value = new String(java.nio.file.Files.readAllBytes(governor.toPath())).trim(); if (validGovernor(value)) governors.put(policies[i].getName(), value); else XposedBridge.log(TAG + ": invalid governor at " + governor); }
+            catch (Throwable t) { XposedBridge.log(TAG + ": governor read failed " + governor + ": " + t); }
+        }
+        return governors;
+    }
+    private static Map readSavedGovernors(Object c) {
+        Map current = readGovernors(); Map savedGovernors = new HashMap();
+        for (Object policyObject : current.keySet()) { String policy = (String) policyObject; String governor = saved(c, GOVERNOR_PREFIX + policy); if (!validGovernor(governor)) return new HashMap(); savedGovernors.put(policy, governor); }
+        return savedGovernors;
+    }
+    private static Map governorsWithValue(Map governors, String value) { Map values = new HashMap(); for (Object policy : governors.keySet()) values.put(policy, value); return values; }
+    private static boolean setGovernors(Map governors) {
+        boolean set = true;
+        for (Object entryObject : governors.entrySet()) { Map.Entry entry = (Map.Entry) entryObject; String policy = (String) entry.getKey(); String governor = (String) entry.getValue(); set = setGovernor(policy, governor) && set; }
+        return set;
+    }
+    private static boolean validGovernor(String governor) { return governor != null && governor.matches("[A-Za-z0-9_.-]+"); }
+    private static boolean setGovernor(String policy, String governor) {
+        if (!policy.matches("policy[0-9]+") || !validGovernor(governor)) { XposedBridge.log(TAG + ": invalid governor write request " + policy + "=" + governor); return false; }
+        File file = new File(new File(CPU_POLICY_PATH, policy), "scaling_governor");
+        try {
+            Process process = Runtime.getRuntime().exec(new String[]{"su", "-c", "echo " + governor + " > " + file.getPath()});
+            int exitCode = process.waitFor();
+            if (exitCode != 0) { XposedBridge.log(TAG + ": governor write failed " + file + " exit=" + exitCode); return false; }
+            String actual = new String(java.nio.file.Files.readAllBytes(file.toPath())).trim();
+            if (governor.equals(actual)) return true;
+            XposedBridge.log(TAG + ": governor write verification failed " + file + " expected=" + governor + " actual=" + actual);
+        } catch (Throwable t) { XposedBridge.log(TAG + ": governor write failed " + file + ": " + t); }
+        return false;
+    }
 }
