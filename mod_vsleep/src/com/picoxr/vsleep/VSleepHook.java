@@ -306,10 +306,7 @@ public final class VSleepHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + ": V-Sleep disable aborted: snapshot is incomplete");
             return;
         }
-        int requestedMode = getGlobalInt(c, COORD_POWER_MODE, -1);
-        boolean restored = requestedMode >= 0 && requestedMode <= 2
-                ? applyRequestedPowerMode(c, requestedMode) : restoreSnapshot(c, snapshot);
-        if (!restored) {
+        if (!restoreSnapshot(c, snapshot)) {
             XposedBridge.log(TAG + ": V-Sleep exit failed; keeping active transaction for retry");
             return;
         }
@@ -319,8 +316,7 @@ public final class VSleepHook implements IXposedHookLoadPackage {
             return;
         }
         advanceGeneration(c);
-        XposedBridge.log(TAG + ": V-Sleep disabled; "
-                + (requestedMode >= 0 ? "applied deferred power mode " + requestedMode : "restored baseline"));
+        XposedBridge.log(TAG + ": V-Sleep disabled; restored pre-sleep baseline");
     }
 
     private static boolean migrateLegacySnapshot(Object c) {
@@ -386,7 +382,7 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static boolean restoreSnapshot(Object c, Snapshot s) {
         boolean restored = setProp(PROP_EYEBUFFER_W, s.width); restored = setProp(PROP_EYEBUFFER_H, s.height) && restored;
         restored = setProp(PROP_FFR, s.ffr) && restored;
-        if (s.fps.length() > 0) restored = setProp(PROP_FPS, s.fps) && restored;
+        restored = setProp(PROP_FPS, s.fps) && restored;
         restored = putSystemInt(c, "screen_brightness", s.brightness) && restored;
         return setGovernors(s.governors) && restored;
     }
@@ -401,25 +397,13 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static boolean clearCoordination(Object c) {
         return putGlobalInt(c, COORD_SNAPSHOT_VALID, 0)
                 && putGlobalInt(c, COORD_ACTIVE, 0)
-                && putGlobalString(c, COORD_OWNER, "");
+                && putGlobalString(c, COORD_OWNER, "")
+                && putGlobalString(c, COORD_POWER_MODE, "");
     }
     private static void advanceGeneration(Object c) {
         int generation = getGlobalInt(c, COORD_GENERATION, 0);
         if (!putGlobalInt(c, COORD_GENERATION, generation + 1)) {
             XposedBridge.log(TAG + ": unable to advance coordination generation");
-        }
-    }
-    private static boolean applyRequestedPowerMode(Object c, int mode) {
-        try {
-            ClassLoader cl = c.getClass().getClassLoader();
-            Class<?> context = Class.forName("android.content.Context", false, cl);
-            Class<?> dsu = XposedHelpers.findClass("com.picovr.settings.custom.DeviceSwitchUtilsKt", cl);
-            dsu.getMethod("e", context, int.class).invoke(null, c, mode);
-            String buffer = mode == 2 ? "2448" : "1504";
-            return setProp(PROP_EYEBUFFER_W, buffer) && setProp(PROP_EYEBUFFER_H, buffer);
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + ": deferred power mode apply failed: " + t);
-            return false;
         }
     }
     private static boolean isEmpty(String value) { return value == null || value.length() == 0; }
