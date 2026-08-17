@@ -11,6 +11,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -36,6 +37,15 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static final String PROP_FFR = "persist.pvr.config.ffr";
     private static final String PROP_FPS = "persist.pvr.config.target_fps";
     private static final String MODULE_PACKAGE = "com.picoxr.vsleep";
+    private static final String COORD_PREFIX = "pico_power_coord_";
+    private static final String COORD_VERSION = COORD_PREFIX + "version";
+    private static final String COORD_OWNER = COORD_PREFIX + "owner";
+    private static final String COORD_ACTIVE = COORD_PREFIX + "sleep_active";
+    private static final String COORD_GENERATION = COORD_PREFIX + "generation";
+    private static final String COORD_SNAPSHOT_VALID = COORD_PREFIX + "snapshot_valid";
+    private static final String COORD_SNAPSHOT_PREFIX = COORD_PREFIX + "snapshot_";
+    private static final String COORD_POWER_MODE = COORD_PREFIX + "requested_power_mode";
+    private static final int COORD_PROTOCOL_VERSION = 1;
     private static volatile Object sButton;
 
     @Override public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lp) {
@@ -265,31 +275,29 @@ public final class VSleepHook implements IXposedHookLoadPackage {
 
     private static synchronized void enable(Object c) {
         if (isEnabled(c)) return;
-        if (hasSnapshot(c)) {
+        if (hasSnapshot(c) || hasCoordSnapshot(c)) {
             XposedBridge.log(TAG + ": refusing enable while a previous snapshot needs restoration");
             return;
         }
         Snapshot snapshot = captureSnapshot(c);
-        if (snapshot == null || !saveSnapshot(c, snapshot)) {
-            XposedBridge.log(TAG + ": V-Sleep enable aborted: could not create a complete snapshot");
+        if (snapshot == null || !saveSnapshot(c, snapshot) || !beginCoordination(c)) {
+            XposedBridge.log(TAG + ": V-Sleep enable aborted: could not create a complete transaction");
             return;
         }
-        boolean applied = applySleepState(c, snapshot.governors);
-        if (!applied) {
-            XposedBridge.log(TAG + ": V-Sleep enable failed; restoring captured state");
-            if (restoreSnapshot(c, snapshot)) clearSnapshot(c);
+        if (!applySleepState(c, snapshot.governors)) {
+            XposedBridge.log(TAG + ": V-Sleep enable failed; keeping transaction for recovery");
             return;
         }
-        if (!putGlobalInt(c, MODE_KEY, 1)) {
-            XposedBridge.log(TAG + ": V-Sleep enable failed to commit state; restoring captured state");
-            if (restoreSnapshot(c, snapshot)) clearSnapshot(c);
+        if (!putGlobalInt(c, MODE_KEY, 1) || !putGlobalInt(c, COORD_ACTIVE, 1)) {
+            XposedBridge.log(TAG + ": V-Sleep enable could not commit state; keeping transaction for recovery");
             return;
         }
-        XposedBridge.log(TAG + ": V-Sleep enabled");
+        advanceGeneration(c);
+        XposedBridge.log(TAG + ": V-Sleep enabled under shared coordination");
     }
 
     private static synchronized void disable(Object c) {
-        if (!hasSnapshot(c) && !migrateLegacySnapshot(c)) {
+        if (!hasSnapshot(c) && !hasCoordSnapshot(c) && !migrateLegacySnapshot(c)) {
             XposedBridge.log(TAG + ": V-Sleep disable aborted: no valid snapshot is available");
             return;
         }
@@ -298,15 +306,21 @@ public final class VSleepHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + ": V-Sleep disable aborted: snapshot is incomplete");
             return;
         }
-        if (!restoreSnapshot(c, snapshot)) {
-            XposedBridge.log(TAG + ": V-Sleep restore failed; keeping snapshot for retry");
+        int requestedMode = getGlobalInt(c, COORD_POWER_MODE, -1);
+        boolean restored = requestedMode >= 0 && requestedMode <= 2
+                ? applyRequestedPowerMode(c, requestedMode) : restoreSnapshot(c, snapshot);
+        if (!restored) {
+            XposedBridge.log(TAG + ": V-Sleep exit failed; keeping active transaction for retry");
             return;
         }
-        if (!putGlobalInt(c, MODE_KEY, 0) || !clearSnapshot(c)) {
-            XposedBridge.log(TAG + ": V-Sleep restore completed but state cleanup failed");
+        if (!putGlobalInt(c, COORD_ACTIVE, 0) || !putGlobalInt(c, MODE_KEY, 0)
+                || !clearSnapshot(c) || !clearCoordination(c)) {
+            XposedBridge.log(TAG + ": V-Sleep exit completed but transaction cleanup failed");
             return;
         }
-        XposedBridge.log(TAG + ": V-Sleep disabled and state restored");
+        advanceGeneration(c);
+        XposedBridge.log(TAG + ": V-Sleep disabled; "
+                + (requestedMode >= 0 ? "applied deferred power mode " + requestedMode : "restored baseline"));
     }
 
     private static boolean migrateLegacySnapshot(Object c) {
@@ -334,16 +348,29 @@ public final class VSleepHook implements IXposedHookLoadPackage {
         boolean saved = save(c, "eyebuffer_w", s.width); saved = save(c, "eyebuffer_h", s.height) && saved;
         saved = save(c, "ffr", s.ffr) && saved; saved = save(c, "fps", s.fps) && saved;
         saved = save(c, "brightness", String.valueOf(s.brightness)) && saved;
+        saved = putGlobalString(c, COORD_SNAPSHOT_PREFIX + "eyebuffer_w", s.width) && saved;
+        saved = putGlobalString(c, COORD_SNAPSHOT_PREFIX + "eyebuffer_h", s.height) && saved;
+        saved = putGlobalString(c, COORD_SNAPSHOT_PREFIX + "ffr", s.ffr) && saved;
+        saved = putGlobalString(c, COORD_SNAPSHOT_PREFIX + "fps", s.fps) && saved;
+        saved = putGlobalInt(c, COORD_SNAPSHOT_PREFIX + "brightness", s.brightness) && saved;
         for (Object entryObject : s.governors.entrySet()) {
             Map.Entry entry = (Map.Entry) entryObject;
-            saved = save(c, GOVERNOR_PREFIX + entry.getKey(), (String) entry.getValue()) && saved;
+            String policy = (String) entry.getKey(); String governor = (String) entry.getValue();
+            saved = save(c, GOVERNOR_PREFIX + policy, governor) && saved;
+            saved = putGlobalString(c, COORD_SNAPSHOT_PREFIX + GOVERNOR_PREFIX + policy, governor) && saved;
         }
-        return saved && putGlobalInt(c, SNAPSHOT_KEY, 1);
+        return saved && putGlobalInt(c, SNAPSHOT_KEY, 1) && putGlobalInt(c, COORD_SNAPSHOT_VALID, 1);
     }
 
     private static Snapshot readSnapshot(Object c) {
-        String width = saved(c, "eyebuffer_w"); String height = saved(c, "eyebuffer_h"); String ffr = saved(c, "ffr"); String fps = saved(c, "fps");
-        int brightness = parseInt(saved(c, "brightness"), -1); Map governors = readSavedGovernors(c);
+        boolean coordinated = hasCoordSnapshot(c);
+        String width = coordinated ? getGlobalString(c, COORD_SNAPSHOT_PREFIX + "eyebuffer_w") : saved(c, "eyebuffer_w");
+        String height = coordinated ? getGlobalString(c, COORD_SNAPSHOT_PREFIX + "eyebuffer_h") : saved(c, "eyebuffer_h");
+        String ffr = coordinated ? getGlobalString(c, COORD_SNAPSHOT_PREFIX + "ffr") : saved(c, "ffr");
+        String fps = coordinated ? getGlobalString(c, COORD_SNAPSHOT_PREFIX + "fps") : saved(c, "fps");
+        int brightness = coordinated ? getGlobalInt(c, COORD_SNAPSHOT_PREFIX + "brightness", -1)
+                : parseInt(saved(c, "brightness"), -1);
+        Map governors = coordinated ? readCoordGovernors(c) : readSavedGovernors(c);
         if (isEmpty(width) || isEmpty(height) || isEmpty(ffr) || brightness < 0 || governors.isEmpty()) return null;
         return new Snapshot(width, height, ffr, fps == null ? "" : fps, brightness, governors);
     }
@@ -364,7 +391,37 @@ public final class VSleepHook implements IXposedHookLoadPackage {
         return setGovernors(s.governors) && restored;
     }
 
+    private static boolean beginCoordination(Object c) {
+        return putGlobalInt(c, COORD_VERSION, COORD_PROTOCOL_VERSION)
+                && putGlobalString(c, COORD_OWNER, "vsleep")
+                && putGlobalInt(c, COORD_ACTIVE, 0);
+    }
+    private static boolean hasCoordSnapshot(Object c) { return getGlobalInt(c, COORD_SNAPSHOT_VALID, 0) == 1; }
     private static boolean clearSnapshot(Object c) { return putGlobalInt(c, SNAPSHOT_KEY, 0); }
+    private static boolean clearCoordination(Object c) {
+        return putGlobalInt(c, COORD_SNAPSHOT_VALID, 0)
+                && putGlobalInt(c, COORD_ACTIVE, 0)
+                && putGlobalString(c, COORD_OWNER, "");
+    }
+    private static void advanceGeneration(Object c) {
+        int generation = getGlobalInt(c, COORD_GENERATION, 0);
+        if (!putGlobalInt(c, COORD_GENERATION, generation + 1)) {
+            XposedBridge.log(TAG + ": unable to advance coordination generation");
+        }
+    }
+    private static boolean applyRequestedPowerMode(Object c, int mode) {
+        try {
+            ClassLoader cl = c.getClass().getClassLoader();
+            Class<?> context = Class.forName("android.content.Context", false, cl);
+            Class<?> dsu = XposedHelpers.findClass("com.picovr.settings.custom.DeviceSwitchUtilsKt", cl);
+            dsu.getMethod("e", context, int.class).invoke(null, c, mode);
+            String buffer = mode == 2 ? "2448" : "1504";
+            return setProp(PROP_EYEBUFFER_W, buffer) && setProp(PROP_EYEBUFFER_H, buffer);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": deferred power mode apply failed: " + t);
+            return false;
+        }
+    }
     private static boolean isEmpty(String value) { return value == null || value.length() == 0; }
 
     private static final class Snapshot {
@@ -391,6 +448,18 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static int getInt(String cls, Object c, String k, int d) { try { return ((Integer) Class.forName(cls).getMethod("getInt", Class.forName("android.content.ContentResolver"), String.class, int.class).invoke(null, resolver(c), k, d)).intValue(); } catch (Throwable t) { XposedBridge.log(TAG + ": setting read failed " + k + ": " + t); return d; } }
     private static boolean putGlobalInt(Object c, String k, int v) { return putInt("android.provider.Settings$Global", c, k, v); }
     private static boolean putSystemInt(Object c, String k, int v) { return putInt("android.provider.Settings$System", c, k, v); }
+    private static String getGlobalString(Object c, String k) {
+        try { return (String) Class.forName("android.provider.Settings$Global").getMethod("getString", Class.forName("android.content.ContentResolver"), String.class).invoke(null, resolver(c), k); }
+        catch (Throwable t) { XposedBridge.log(TAG + ": string read failed " + k + ": " + t); return null; }
+    }
+    private static boolean putGlobalString(Object c, String k, String v) {
+        try {
+            Boolean written = (Boolean) Class.forName("android.provider.Settings$Global").getMethod("putString", Class.forName("android.content.ContentResolver"), String.class, String.class).invoke(null, resolver(c), k, v);
+            if (written.booleanValue() && v.equals(getGlobalString(c, k))) return true;
+            XposedBridge.log(TAG + ": string write verification failed " + k);
+        } catch (Throwable t) { XposedBridge.log(TAG + ": string write failed " + k + ": " + t); }
+        return false;
+    }
     private static boolean putInt(String cls, Object c, String k, int v) { try { Boolean written = (Boolean) Class.forName(cls).getMethod("putInt", Class.forName("android.content.ContentResolver"), String.class, int.class).invoke(null, resolver(c), k, v); if (written.booleanValue() && getInt(cls, c, k, Integer.MIN_VALUE) == v) return true; XposedBridge.log(TAG + ": setting write verification failed " + k + "=" + v); } catch (Throwable t) { XposedBridge.log(TAG + ": setting write failed " + k + ": " + t); } return false; }
     private static boolean save(Object c, String s, String v) { try { Boolean written = (Boolean) Class.forName("android.provider.Settings$Global").getMethod("putString", Class.forName("android.content.ContentResolver"), String.class, String.class).invoke(null, resolver(c), SAVED_PREFIX + s, v); if (written.booleanValue() && v.equals(saved(c, s))) return true; XposedBridge.log(TAG + ": save verification failed " + s); } catch (Throwable t) { XposedBridge.log(TAG + ": save failed " + s + ": " + t); } return false; }
     private static String saved(Object c, String s) { try { return (String) Class.forName("android.provider.Settings$Global").getMethod("getString", Class.forName("android.content.ContentResolver"), String.class).invoke(null, resolver(c), SAVED_PREFIX + s); } catch (Throwable t) { XposedBridge.log(TAG + ": saved value read failed " + s + ": " + t); return null; } }
@@ -412,6 +481,16 @@ public final class VSleepHook implements IXposedHookLoadPackage {
         for (Object policyObject : current.keySet()) { String policy = (String) policyObject; String governor = saved(c, GOVERNOR_PREFIX + policy); if (!validGovernor(governor)) return new HashMap(); savedGovernors.put(policy, governor); }
         return savedGovernors;
     }
+    private static Map readCoordGovernors(Object c) {
+        Map current = readGovernors(); Map savedGovernors = new HashMap();
+        for (Object policyObject : current.keySet()) {
+            String policy = (String) policyObject;
+            String governor = getGlobalString(c, COORD_SNAPSHOT_PREFIX + GOVERNOR_PREFIX + policy);
+            if (!validGovernor(governor)) return new HashMap();
+            savedGovernors.put(policy, governor);
+        }
+        return savedGovernors;
+    }
     private static Map governorsWithValue(Map governors, String value) { Map values = new HashMap(); for (Object policy : governors.keySet()) values.put(policy, value); return values; }
     private static boolean setGovernors(Map governors) {
         boolean set = true;
@@ -424,7 +503,12 @@ public final class VSleepHook implements IXposedHookLoadPackage {
         File file = new File(new File(CPU_POLICY_PATH, policy), "scaling_governor");
         try {
             Process process = Runtime.getRuntime().exec(new String[]{"su", "-c", "echo " + governor + " > " + file.getPath()});
-            int exitCode = process.waitFor();
+            if (!process.waitFor(2, TimeUnit.SECONDS)) {
+                process.destroy();
+                XposedBridge.log(TAG + ": governor write timed out " + file);
+                return false;
+            }
+            int exitCode = process.exitValue();
             if (exitCode != 0) { XposedBridge.log(TAG + ": governor write failed " + file + " exit=" + exitCode); return false; }
             String actual = new String(java.nio.file.Files.readAllBytes(file.toPath())).trim();
             if (governor.equals(actual)) return true;
