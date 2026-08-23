@@ -19,6 +19,7 @@ import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
+
 /** Adds a V-Sleep toggle to the quick-settings panel without modifying the system APK. */
 public final class VSleepHook implements IXposedHookLoadPackage {
     private static final String TAG = "PicoVSleep";
@@ -47,6 +48,7 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static final String COORD_POWER_MODE = COORD_PREFIX + "requested_power_mode";
     private static final int COORD_PROTOCOL_VERSION = 1;
     private static volatile Object sButton;
+    private static Object sWakeLock;
 
     @Override public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lp) {
         if (!SETTINGS_PACKAGE.equals(lp.packageName)) return;
@@ -293,6 +295,7 @@ public final class VSleepHook implements IXposedHookLoadPackage {
             return;
         }
         advanceGeneration(c);
+        acquireWakeLock(c);
         XposedBridge.log(TAG + ": V-Sleep enabled under shared coordination");
     }
 
@@ -316,7 +319,29 @@ public final class VSleepHook implements IXposedHookLoadPackage {
             return;
         }
         advanceGeneration(c);
+        releaseWakeLock();
         XposedBridge.log(TAG + ": V-Sleep disabled; restored pre-sleep baseline");
+    }
+
+    private static synchronized void acquireWakeLock(Object c) {
+        try {
+            if (sWakeLock != null) return;
+            Object pm = c.getClass().getMethod("getSystemService", String.class).invoke(c, "power");
+            Object wl = pm.getClass().getMethod("newWakeLock", int.class, String.class)
+                    .invoke(pm, 0x0000000a, TAG + ":WakeLock"); // SCREEN_DIM_WAKE_LOCK | ACQUIRE_CAUSES_WAKELOCK = 10
+            wl.getClass().getMethod("acquire").invoke(wl);
+            sWakeLock = wl;
+            XposedBridge.log(TAG + ": screen dim wakelock acquired");
+        } catch (Throwable t) { XposedBridge.log(TAG + ": failed to acquire wakelock: " + t); }
+    }
+
+    private static synchronized void releaseWakeLock() {
+        try {
+            if (sWakeLock == null) return;
+            sWakeLock.getClass().getMethod("release").invoke(sWakeLock);
+            sWakeLock = null;
+            XposedBridge.log(TAG + ": wakelock released");
+        } catch (Throwable t) { XposedBridge.log(TAG + ": failed to release wakelock: " + t); }
     }
 
     private static boolean migrateLegacySnapshot(Object c) {
