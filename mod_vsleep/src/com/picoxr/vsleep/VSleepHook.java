@@ -13,6 +13,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.UUID;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -39,6 +40,8 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static final String PROP_EYEBUFFER_W = "persist.pvr.config.eyebuffer_width";
     private static final String PROP_EYEBUFFER_H = "persist.pvr.config.eyebuffer_height";
     private static final String PROP_FFR = "persist.pvr.config.ffr";
+    private static final String PROP_ENABLE_FFR = "persist.pvr.config.enable_ffr";
+    private static final String PROP_FOVEATION = "persist.pvr.foveation.level";
     private static final String PROP_FPS = "persist.pvr.config.target_fps";
     private static final String MODULE_PACKAGE = "com.picoxr.vsleep";
     private static final String COORD_PREFIX = "pico_power_coord_";
@@ -48,8 +51,13 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static final String COORD_GENERATION = COORD_PREFIX + "generation";
     private static final String COORD_SNAPSHOT_VALID = COORD_PREFIX + "snapshot_valid";
     private static final String COORD_SNAPSHOT_PREFIX = COORD_PREFIX + "snapshot_";
-    private static final String COORD_POWER_MODE = COORD_PREFIX + "requested_power_mode";
-    private static final int COORD_PROTOCOL_VERSION = 1;
+    private static final String COORD_REQUEST = COORD_PREFIX + "v2_request";
+    private static final String COORD_ACK = COORD_PREFIX + "v2_ack";
+    private static final String COORD_EFFECTIVE_OWNER = COORD_PREFIX + "v2_effective_owner";
+    private static final String COORD_PHASE = COORD_PREFIX + "v2_phase";
+    private static final String COORD_ERROR = COORD_PREFIX + "v2_error";
+    private static final int COORD_PROTOCOL_VERSION = 2;
+    private static final long COORD_POLL_MS = 250L;
     private static final long UNWORN_SLEEP_DELAY_MS = TimeUnit.MINUTES.toMillis(3);
     private static final ScheduledExecutorService SLEEP_EXECUTOR = Executors.newSingleThreadScheduledExecutor();
     private static volatile Object sButton;
@@ -59,6 +67,7 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static volatile ScheduledFuture sPendingSleep;
     private static volatile boolean sWearKnown;
     private static volatile boolean sWorn;
+    private static volatile boolean sCoordinationPollStarted;
     private static final ThreadLocal MAPPED_BIND_ITEM = new ThreadLocal();
     private static Object sWakeLock;
 
@@ -132,10 +141,13 @@ public final class VSleepHook implements IXposedHookLoadPackage {
         try {
             Class<?> app = XposedHelpers.findClass("com.picovr.settings.SettingApplication", cl);
             XposedHelpers.findAndHookMethod(app, "onCreate", new XC_MethodHook() {
-                @Override protected void afterHookedMethod(MethodHookParam p) { registerWearSensor(p.thisObject); }
+                @Override protected void afterHookedMethod(MethodHookParam p) { registerWearSensor(p.thisObject); startCoordinationPoll(p.thisObject); }
             });
             Object current = SettingApplication();
-            if (current != null) registerWearSensor(current);
+            if (current != null) {
+                registerWearSensor(current);
+                startCoordinationPoll(current);
+            }
             XposedBridge.log(TAG + ": wear lifecycle hook installed");
         } catch (Throwable t) { XposedBridge.log(TAG + ": wear lifecycle hook failed: " + t); }
     }
@@ -208,7 +220,7 @@ public final class VSleepHook implements IXposedHookLoadPackage {
         sPendingSleep = SLEEP_EXECUTOR.schedule(new Runnable() {
             @Override public void run() {
                 synchronized (VSleepHook.class) {
-                    if (sWorn || !isEnabled(context)) return;
+                    if (sWorn || !isEnabled(context)) { sPendingSleep = null; return; }
                     sPendingSleep = null;
                     releaseWakeLock();
                     requestSleep(context);
@@ -432,9 +444,11 @@ public final class VSleepHook implements IXposedHookLoadPackage {
         try {
             Object button = sButton;
             if (button == null) return;
-            boolean enabled = isEnabled(c);
+            boolean enabled = effectiveUiEnabled(c);
             button.getClass().getMethod("h", boolean.class).invoke(button, enabled);
-            button.getClass().getMethod("setTipText", String.class).invoke(button, enabled ? "V-Sleep Mode 已开启" : "V-Sleep Mode");
+            String phase = getGlobalString(c, COORD_PHASE);
+            String tip = enabled ? "V-Sleep Mode \u5df2\u5f00\u542f" : (CoordinationProtocol.PHASE_RESTORING.equals(phase) ? "\u6b63\u5728\u6062\u590d\u7535\u6e90\u6a21\u5f0f" : (CoordinationProtocol.PHASE_ERROR.equals(phase) ? "\u7535\u6e90\u6a21\u5f0f\u6062\u590d\u5931\u8d25" : "V-Sleep Mode"));
+            button.getClass().getMethod("setTipText", String.class).invoke(button, tip);
             Object image = findImageView(button);
             if (image == null) return;
             Object drawable = moduleDrawable(c);
@@ -463,6 +477,9 @@ public final class VSleepHook implements IXposedHookLoadPackage {
         return null;
     }
     private static boolean isEnabled(Object c) { return getGlobalInt(c, MODE_KEY, 0) == 1; }
+    private static boolean effectiveUiEnabled(Object c) {
+        return CoordinationProtocol.effectiveUiEnabled(getGlobalString(c, COORD_EFFECTIVE_OWNER), getGlobalString(c, COORD_PHASE), isEnabled(c));
+    }
     private static boolean hasSnapshot(Object c) { return getGlobalInt(c, SNAPSHOT_KEY, 0) == 1; }
 
     private static synchronized void enable(Object c) {
@@ -471,23 +488,36 @@ public final class VSleepHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + ": refusing enable while a previous snapshot needs restoration");
             return;
         }
+        String token = newToken();
+        String request = CoordinationProtocol.request(token, "vsleep", "enable");
+        if (request == null || !putGlobalString(c, COORD_REQUEST, request)) return;
+        if (!isLatestRequest(c, request)) return;
         Snapshot snapshot = captureSnapshot(c);
         if (snapshot == null || !saveSnapshot(c, snapshot) || !beginCoordination(c)) {
-            XposedBridge.log(TAG + ": V-Sleep enable aborted: could not create a complete transaction");
+            putGlobalString(c, COORD_ERROR, "\u5feb\u7167\u5931\u8d25");
             return;
         }
+        if (!isLatestRequest(c, request) || hasPowerRequest(c, request)) return;
         if (!applySleepState(c, snapshot.governors)) {
-            XposedBridge.log(TAG + ": V-Sleep enable failed; keeping transaction for recovery");
+            putGlobalString(c, COORD_PHASE, CoordinationProtocol.PHASE_ERROR);
             return;
         }
-        if (!putGlobalInt(c, MODE_KEY, 1) || !putGlobalInt(c, COORD_ACTIVE, 1)) {
-            XposedBridge.log(TAG + ": V-Sleep enable could not commit state; keeping transaction for recovery");
+        if (!isLatestRequest(c, request)) {
+            XposedBridge.log(TAG + ": V-Sleep request was superseded during apply; recovery is delegated to poll");
+            return;
+        }
+        // MODE_KEY is the final commit point for enabling V-Sleep.
+        if (!putGlobalInt(c, COORD_ACTIVE, 1)
+                || !putGlobalString(c, COORD_EFFECTIVE_OWNER, "vsleep")
+                || !putGlobalString(c, COORD_PHASE, CoordinationProtocol.PHASE_ACTIVE)
+                || !putGlobalString(c, COORD_ACK, request)
+                || !putGlobalInt(c, MODE_KEY, 1)) {
+            putGlobalString(c, COORD_PHASE, CoordinationProtocol.PHASE_ERROR);
             return;
         }
         advanceGeneration(c);
         if (sWearKnown) onWearState(c, sWorn);
         else XposedBridge.log(TAG + ": V-Sleep enabled with native proximity policy until wear state is known");
-        XposedBridge.log(TAG + ": V-Sleep enabled under shared coordination");
     }
 
     private static synchronized void disable(Object c) {
@@ -546,32 +576,35 @@ public final class VSleepHook implements IXposedHookLoadPackage {
 
     private static boolean migrateLegacySnapshot(Object c) {
         if (!isEnabled(c)) return false;
-        String width = saved(c, "eyebuffer_w"); String height = saved(c, "eyebuffer_h"); String ffr = saved(c, "ffr"); String fps = saved(c, "fps");
+        String width = saved(c, "eyebuffer_w"); String height = saved(c, "eyebuffer_h"); String ffr = saved(c, "ffr"); String enableFfr = saved(c, "enable_ffr"); String foveation = saved(c, "foveation"); String fps = saved(c, "fps");
         int brightness = parseInt(saved(c, "brightness"), -1); String governor = saved(c, "governor"); Map current = readGovernors();
-        if (isEmpty(width) || isEmpty(height) || isEmpty(ffr) || brightness < 0 || !validGovernor(governor) || current.isEmpty()) return false;
-        Snapshot legacy = new Snapshot(width, height, ffr, fps == null ? "" : fps, brightness, governorsWithValue(current, governor));
+        if (isEmpty(width) || isEmpty(height) || isEmpty(ffr) || isEmpty(enableFfr) || isEmpty(foveation) || brightness < 0 || !validGovernor(governor) || current.isEmpty()) return false;
+        Snapshot legacy = new Snapshot(width, height, ffr, enableFfr, foveation, fps == null ? "" : fps, brightness, governorsWithValue(current, governor));
         boolean migrated = saveSnapshot(c, legacy);
         if (migrated) XposedBridge.log(TAG + ": migrated legacy V-Sleep snapshot for " + current.size() + " CPU policies");
         return migrated;
     }
 
     private static Snapshot captureSnapshot(Object c) {
-        String width = getProp(PROP_EYEBUFFER_W); String height = getProp(PROP_EYEBUFFER_H); String ffr = getProp(PROP_FFR); String fps = getProp(PROP_FPS);
+        String width = getProp(PROP_EYEBUFFER_W); String height = getProp(PROP_EYEBUFFER_H); String ffr = getProp(PROP_FFR); String enableFfr = getProp(PROP_ENABLE_FFR); String foveation = getProp(PROP_FOVEATION); String fps = getProp(PROP_FPS);
         int brightness = getSystemInt(c, "screen_brightness", -1); Map governors = readGovernors();
-        if (isEmpty(width) || isEmpty(height) || isEmpty(ffr) || brightness < 0 || governors.isEmpty()) {
+        if (isEmpty(width) || isEmpty(height) || isEmpty(ffr) || isEmpty(enableFfr) || isEmpty(foveation) || brightness < 0 || governors.isEmpty()) {
             XposedBridge.log(TAG + ": invalid snapshot width=" + width + " height=" + height + " ffr=" + ffr + " brightness=" + brightness + " governors=" + governors.size());
             return null;
         }
-        return new Snapshot(width, height, ffr, fps, brightness, governors);
+        return new Snapshot(width, height, ffr, enableFfr, foveation, fps, brightness, governors);
     }
 
     private static boolean saveSnapshot(Object c, Snapshot s) {
         boolean saved = save(c, "eyebuffer_w", s.width); saved = save(c, "eyebuffer_h", s.height) && saved;
-        saved = save(c, "ffr", s.ffr) && saved; saved = save(c, "fps", s.fps) && saved;
+        saved = save(c, "ffr", s.ffr) && saved; saved = save(c, "enable_ffr", s.enableFfr) && saved;
+        saved = save(c, "foveation", s.foveation) && saved; saved = save(c, "fps", s.fps) && saved;
         saved = save(c, "brightness", String.valueOf(s.brightness)) && saved;
         saved = putGlobalString(c, COORD_SNAPSHOT_PREFIX + "eyebuffer_w", s.width) && saved;
         saved = putGlobalString(c, COORD_SNAPSHOT_PREFIX + "eyebuffer_h", s.height) && saved;
         saved = putGlobalString(c, COORD_SNAPSHOT_PREFIX + "ffr", s.ffr) && saved;
+        saved = putGlobalString(c, COORD_SNAPSHOT_PREFIX + "enable_ffr", s.enableFfr) && saved;
+        saved = putGlobalString(c, COORD_SNAPSHOT_PREFIX + "foveation", s.foveation) && saved;
         saved = putGlobalString(c, COORD_SNAPSHOT_PREFIX + "fps", s.fps) && saved;
         saved = putGlobalInt(c, COORD_SNAPSHOT_PREFIX + "brightness", s.brightness) && saved;
         for (Object entryObject : s.governors.entrySet()) {
@@ -588,12 +621,17 @@ public final class VSleepHook implements IXposedHookLoadPackage {
         String width = coordinated ? getGlobalString(c, COORD_SNAPSHOT_PREFIX + "eyebuffer_w") : saved(c, "eyebuffer_w");
         String height = coordinated ? getGlobalString(c, COORD_SNAPSHOT_PREFIX + "eyebuffer_h") : saved(c, "eyebuffer_h");
         String ffr = coordinated ? getGlobalString(c, COORD_SNAPSHOT_PREFIX + "ffr") : saved(c, "ffr");
+        String enableFfr = coordinated ? getGlobalString(c, COORD_SNAPSHOT_PREFIX + "enable_ffr") : saved(c, "enable_ffr");
+        String foveation = coordinated ? getGlobalString(c, COORD_SNAPSHOT_PREFIX + "foveation") : saved(c, "foveation");
+        // v1 never changed these properties, so the live values are their baseline during migration.
+        if (isEmpty(enableFfr)) enableFfr = getProp(PROP_ENABLE_FFR);
+        if (isEmpty(foveation)) foveation = getProp(PROP_FOVEATION);
         String fps = coordinated ? getGlobalString(c, COORD_SNAPSHOT_PREFIX + "fps") : saved(c, "fps");
         int brightness = coordinated ? getGlobalInt(c, COORD_SNAPSHOT_PREFIX + "brightness", -1)
                 : parseInt(saved(c, "brightness"), -1);
         Map governors = coordinated ? readCoordGovernors(c) : readSavedGovernors(c);
-        if (isEmpty(width) || isEmpty(height) || isEmpty(ffr) || brightness < 0 || governors.isEmpty()) return null;
-        return new Snapshot(width, height, ffr, fps == null ? "" : fps, brightness, governors);
+        if (isEmpty(width) || isEmpty(height) || isEmpty(ffr) || isEmpty(enableFfr) || isEmpty(foveation) || brightness < 0 || governors.isEmpty()) return null;
+        return new Snapshot(width, height, ffr, enableFfr, foveation, fps == null ? "" : fps, brightness, governors);
     }
 
     private static boolean applySleepState(Object c, Map originalGovernors) {
@@ -607,6 +645,8 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static boolean restoreSnapshot(Object c, Snapshot s) {
         boolean restored = setProp(PROP_EYEBUFFER_W, s.width); restored = setProp(PROP_EYEBUFFER_H, s.height) && restored;
         restored = setProp(PROP_FFR, s.ffr) && restored;
+        restored = setProp(PROP_ENABLE_FFR, s.enableFfr) && restored;
+        restored = setProp(PROP_FOVEATION, s.foveation) && restored;
         restored = setProp(PROP_FPS, s.fps) && restored;
         restored = putSystemInt(c, "screen_brightness", s.brightness) && restored;
         return setGovernors(s.governors) && restored;
@@ -615,15 +655,84 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static boolean beginCoordination(Object c) {
         return putGlobalInt(c, COORD_VERSION, COORD_PROTOCOL_VERSION)
                 && putGlobalString(c, COORD_OWNER, "vsleep")
+                && putGlobalString(c, COORD_EFFECTIVE_OWNER, "vsleep")
+                && putGlobalString(c, COORD_PHASE, "preparing")
                 && putGlobalInt(c, COORD_ACTIVE, 0);
+    }
+
+    private static String newToken() { return UUID.randomUUID().toString(); }
+
+    private static boolean isLatestRequest(Object c, String request) {
+        return request != null && request.equals(getGlobalString(c, COORD_REQUEST));
+    }
+
+    private static boolean hasPowerRequest(Object c, String ownRequest) {
+        CoordinationProtocol.Request r = CoordinationProtocol.parse(getGlobalString(c, COORD_REQUEST));
+        return r != null && "power".equals(r.owner) && !ownRequest.equals(r.raw);
+    }
+
+    private static synchronized void startCoordinationPoll(final Object c) {
+        if (sCoordinationPollStarted) return;
+        sCoordinationPollStarted = true;
+        SLEEP_EXECUTOR.scheduleWithFixedDelay(new Runnable() {
+            @Override public void run() { pollPowerRequest(c); }
+        }, COORD_POLL_MS, COORD_POLL_MS, TimeUnit.MILLISECONDS);
+    }
+
+    private static synchronized void pollPowerRequest(Object c) {
+        if (!isEnabled(c) && !hasSnapshot(c) && !hasCoordSnapshot(c)) return;
+        CoordinationProtocol.Request request = CoordinationProtocol.parse(getGlobalString(c, COORD_REQUEST));
+        if (request == null || !"power".equals(request.owner)) return;
+        String ack = getGlobalString(c, COORD_ACK);
+        if (request.raw.equals(ack)) return;
+        putGlobalString(c, COORD_PHASE, CoordinationProtocol.PHASE_RESTORING);
+        postRefresh(c);
+        cancelPendingSleep();
+        releaseWakeLock();
+        if (hasSnapshot(c) || hasCoordSnapshot(c)) {
+            Snapshot snapshot = readSnapshot(c);
+            if (snapshot == null || !restoreSnapshot(c, snapshot)) {
+                putGlobalString(c, COORD_PHASE, CoordinationProtocol.PHASE_ERROR);
+                putGlobalString(c, COORD_ERROR, "\u6062\u590d\u5931\u8d25");
+                return;
+            }
+            if (!clearSnapshot(c) || !clearCoordination(c)) {
+                putGlobalString(c, COORD_PHASE, CoordinationProtocol.PHASE_ERROR);
+                putGlobalString(c, COORD_ERROR, "\u6e05\u7406\u5931\u8d25");
+                return;
+            }
+        }
+        if (!putGlobalInt(c, MODE_KEY, 0)) {
+            putGlobalString(c, COORD_PHASE, CoordinationProtocol.PHASE_ERROR);
+            putGlobalString(c, COORD_ERROR, "\u6a21\u5f0f\u6e05\u9664\u5931\u8d25");
+            return;
+        }
+        CoordinationProtocol.Request latest = CoordinationProtocol.parse(getGlobalString(c, COORD_REQUEST));
+        if (latest == null || !"power".equals(latest.owner)) return;
+        if (!putGlobalString(c, COORD_ACK, latest.raw)) {
+            putGlobalString(c, COORD_PHASE, CoordinationProtocol.PHASE_ERROR);
+            putGlobalString(c, COORD_ERROR, "确认失败");
+            return;
+        }
+        putGlobalString(c, COORD_EFFECTIVE_OWNER, "power:" + latest.payload);
+        putGlobalString(c, COORD_PHASE, "idle");
+        postRefresh(c);
+    }
+
+    private static void postRefresh(final Object c) {
+        try {
+            Object button = sButton;
+            if (button != null) button.getClass().getMethod("post", Runnable.class).invoke(button, new Runnable() {
+                @Override public void run() { refreshTile(c); }
+            });
+        } catch (Throwable t) { XposedBridge.log(TAG + ": UI refresh post failed: " + t); }
     }
     private static boolean hasCoordSnapshot(Object c) { return getGlobalInt(c, COORD_SNAPSHOT_VALID, 0) == 1; }
     private static boolean clearSnapshot(Object c) { return putGlobalInt(c, SNAPSHOT_KEY, 0); }
     private static boolean clearCoordination(Object c) {
         return putGlobalInt(c, COORD_SNAPSHOT_VALID, 0)
                 && putGlobalInt(c, COORD_ACTIVE, 0)
-                && putGlobalString(c, COORD_OWNER, "")
-                && putGlobalString(c, COORD_POWER_MODE, "");
+                && putGlobalString(c, COORD_OWNER, "");
     }
     private static void advanceGeneration(Object c) {
         int generation = getGlobalInt(c, COORD_GENERATION, 0);
@@ -634,11 +743,11 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static boolean isEmpty(String value) { return value == null || value.length() == 0; }
 
     private static final class Snapshot {
-        final String width, height, ffr, fps;
+        final String width, height, ffr, enableFfr, foveation, fps;
         final int brightness;
         final Map governors;
-        Snapshot(String width, String height, String ffr, String fps, int brightness, Map governors) {
-            this.width = width; this.height = height; this.ffr = ffr; this.fps = fps; this.brightness = brightness; this.governors = governors;
+        Snapshot(String width, String height, String ffr, String enableFfr, String foveation, String fps, int brightness, Map governors) {
+            this.width = width; this.height = height; this.ffr = ffr; this.enableFfr = enableFfr; this.foveation = foveation; this.fps = fps; this.brightness = brightness; this.governors = governors;
         }
     }
 

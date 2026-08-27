@@ -1,17 +1,29 @@
 # Runtime Coordination
 
-This module participates in protocol `pico_power_coord_v1` through `Settings.Global`.
+本模块通过 `Settings.Global` 实现 `pico_power_coord_v2` 最后操作生效协议。
 
-## Ownership
+## v2 keys
 
-- V-Sleep owns physical display and CPU state while `pico_power_coord_owner=vsleep` and `pico_power_coord_sleep_active=1`.
-- Power Mode may publish `pico_power_coord_requested_power_mode`, but it must not write shared rendering, brightness, or CPU state while V-Sleep owns the transaction.
-- On V-Sleep exit, the captured pre-sleep baseline is always restored. A Power Mode request made during the transaction is not applied on exit and is cleared with the completed transaction. The user must choose Power Mode again after V-Sleep exits to apply it.
+- `pico_power_coord_v2_request`
+- `pico_power_coord_v2_ack`
+- `pico_power_coord_v2_effective_owner`
+- `pico_power_coord_v2_phase`
+- `pico_power_coord_v2_error`
 
-## Stored State
+请求格式为 `2|token|owner|payload`。token 使用 Java 8 `UUID.randomUUID()` 生成。`request` 是发布者的最新意图；`ack` 只能复制当前完整 request，因此新请求覆盖旧请求时不得确认旧请求。
 
-The transaction records eye-buffer width and height, FFR, the exact FPS property value including an empty value, brightness, and every discovered CPU policy governor. `pico_power_coord_snapshot_valid=1` means restoration remains pending. Hardware state is never replaced with guessed defaults.
+## Ownership and handoff
+
+V-Sleep enable 先发布 `owner=vsleep` 请求。只有请求仍为最新、且没有待恢复快照时，才捕获快照并应用低功耗状态；`pico_vsleep_enabled` 是最后提交点。成功后 `effective_owner=vsleep`、`phase=active`，且 `ack=request`。
+
+当 V-Sleep active 或存在快照时发现最新 `owner=power` 请求，立即关闭有效 UI、取消睡眠计时、释放 wakelock，恢复私有和协调快照，并完整清理事务；只有清理完成后才 ack 当前最新 power request。轮询使用已有单线程 executor。新请求覆盖旧请求时只处理最新请求，不重复恢复旧快照。
+
+Settings 进程重启后，启动轮询会根据持久化快照和最新 power request 继续恢复交接。UI 不仅检查 `pico_vsleep_enabled`，只有 `effective_owner=vsleep`、`phase=active` 且 committed 状态才显示开启；`restoring` / `error` 显示中文短提示并关闭开启边框。
+
+## Stored state
+
+事务记录 eye-buffer 宽高、FFR、enable_ffr、foveation.level、精确 FPS（含空值）、亮度和每个 CPU policy 的 governor。升级读取旧 v1 事务时，v1 未管理的两项属性使用当时仍未被模块修改的 live 值。`pico_power_coord_snapshot_valid=1` 表示恢复仍待完成。硬件状态不会用猜测的默认值替换。快捷面板编辑继续隔离 Room，仅保存模块自己的全局设置。
 
 ## Validation
 
-This protocol targets PICO 4 A8110 firmware `5.13.7`. Verify V-Sleep enable/disable at every Power Mode level, a deferred Power Mode selection while V-Sleep is active, and recovery after restarting `com.picovr.settings`.
+协议纯 Java 判断逻辑位于 `CoordinationProtocol.java`，测试覆盖非法解析、token 精确匹配、later request wins 和 effective UI 判定；原有排序、佩戴传感器、180 秒睡眠延迟测试保持有效。目标设备为 PICO 4 A8110 firmware `5.13.7`，需验证每个 Power Mode 等级、active 状态下请求、刷新 Settings 以及进程重启恢复。

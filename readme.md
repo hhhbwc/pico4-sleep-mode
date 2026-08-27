@@ -25,6 +25,7 @@ PICO 4 的 LSPosed 模块：把一个 V-Sleep Mode 开关加入 Dock 右侧时�
 - 已在实机连续开关测试，开启与恢复均有 LSPosed 日志记录。
 - 戴着头显时保持亮屏；摘下后等待 3 分钟再休眠，倒计时内重新戴上会取消休眠。
 - 支持在“设置 -> 通用 -> 快捷方式”中添加、移除和拖拽排序；模块条目不会写入 PICO 的 Room 数据库。
+- 使用 `pico_power_coord_v2` 最后操作生效协议：请求格式 `2|token|owner|payload`，V-Sleep 与 Power Mode 通过 request/ack/effective_owner/phase/error 完成交接；版本 1.2 (code 3)。
 
 ### 当前限制与计划
 
@@ -72,6 +73,7 @@ I was about to V-sleep in VRChat. My power bank could not keep up with the heads
 - Repeated on-device toggle testing completed, with LSPosed logs for both activation and restoration.
 - The display stays awake while the headset is worn. Removing it starts a three-minute sleep timer; wearing it again cancels the timer.
 - The tile can be added, removed, and reordered under Settings -> General -> Shortcuts. Module metadata is never written to PICO's Room database.
+- Uses the `pico_power_coord_v2` last-operation-wins protocol (`2|token|owner|payload`) with request/ack/effective-owner/phase/error handoff; version 1.2 (code 3).
 
 ### Limitations and roadmap
 
