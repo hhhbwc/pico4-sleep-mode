@@ -6,11 +6,12 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
@@ -29,6 +30,8 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static final String MODE_KEY = "pico_vsleep_enabled";
     private static final String TILE_ADDED_KEY = "pico_vsleep_quick_added";
     private static final String TILE_INDEX_KEY = "pico_vsleep_quick_index";
+    private static final String WORN_KEY = "pico_vsleep_headset_worn";
+    private static final String REMOVED_AT_KEY = "pico_vsleep_headset_removed_at";
     private static final String SAVED_PREFIX = "pico_vsleep_saved_";
     private static final String SNAPSHOT_KEY = "pico_vsleep_snapshot_valid";
     private static final String GOVERNOR_PREFIX = "governor_";
@@ -47,7 +50,16 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static final String COORD_SNAPSHOT_PREFIX = COORD_PREFIX + "snapshot_";
     private static final String COORD_POWER_MODE = COORD_PREFIX + "requested_power_mode";
     private static final int COORD_PROTOCOL_VERSION = 1;
+    private static final long UNWORN_SLEEP_DELAY_MS = TimeUnit.MINUTES.toMillis(3);
+    private static final ScheduledExecutorService SLEEP_EXECUTOR = Executors.newSingleThreadScheduledExecutor();
     private static volatile Object sButton;
+    private static volatile Object sAppContext;
+    private static volatile Object sSensorManager;
+    private static volatile Object sProximityListener;
+    private static volatile ScheduledFuture sPendingSleep;
+    private static volatile boolean sWearKnown;
+    private static volatile boolean sWorn;
+    private static final ThreadLocal MAPPED_BIND_ITEM = new ThreadLocal();
     private static Object sWakeLock;
 
     @Override public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lp) {
@@ -76,8 +88,149 @@ public final class VSleepHook implements IXposedHookLoadPackage {
             XposedHelpers.findAndHookMethod(utils, "b", Class.forName("android.content.Context", false, lp.classLoader), loadCallback, new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam p) { p.args[1] = quickPanelCallback(p.args[1], loadCallback, lp.classLoader); }
             });
+            installEditorHooks(lp.classLoader);
+            installWearLifecycleHook(lp.classLoader);
             XposedBridge.log(TAG + ": quick-settings hooks installed");
         } catch (Throwable t) { XposedBridge.log(TAG + ": failed to hook quick-settings adapter: " + t); }
+    }
+
+    private static void installEditorHooks(final ClassLoader cl) {
+        try {
+            final Class<?> fragment = XposedHelpers.findClass("com.picovr.fragments.QuickPanelFragment", cl);
+            final Class<?> manager = XposedHelpers.findClass("com.picovr.database.quickpanel.QuickPanelManager", cl);
+            final Class<?> callback = XposedHelpers.findClass("com.picovr.listener.ResultCallback", cl);
+            final Class<?> added = XposedHelpers.findClass("com.picovr.adapters.QuickPanelAddedAdapter", cl);
+            final Class<?> more = XposedHelpers.findClass("com.picovr.adapters.QuickPanelMoreAdapter", cl);
+            final Class<?> holderA = XposedHelpers.findClass("com.picovr.adapters.QuickPanelAddedAdapter$AddedHolder", cl);
+            final Class<?> holderM = XposedHelpers.findClass("com.picovr.adapters.QuickPanelMoreAdapter$MoreHolder", cl);
+            fragment.getDeclaredMethod("I", List.class, List.class, boolean.class);
+            manager.getDeclaredMethod("A", List.class, callback);
+            added.getDeclaredMethod("m", holderA, int.class);
+            more.getDeclaredMethod("c", holderM, int.class);
+            XposedHelpers.findClass("com.picovr.database.quickpanel.QuickPanelItem", cl)
+                    .getConstructor(int.class, int.class, int.class, int.class, int.class, String.class);
+
+            XposedHelpers.findAndHookMethod(manager, "A", List.class, callback, new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    p.args[0] = saveTileEdit((List) p.args[0]);
+                }
+            });
+            XposedHelpers.findAndHookMethod(fragment, "I", List.class, List.class, boolean.class, new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    try { addTileToEditor((List) p.args[0], (List) p.args[1], cl); }
+                    catch (Throwable t) { XposedBridge.log(TAG + ": editor load hook failed: " + t); }
+                }
+            });
+            hookEditorLabels(added, more, holderA, holderM);
+            XposedBridge.log(TAG + ": editor hooks installed");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": editor hooks unavailable; runtime tile remains safe: " + t);
+        }
+    }
+
+    private static void installWearLifecycleHook(ClassLoader cl) {
+        try {
+            Class<?> app = XposedHelpers.findClass("com.picovr.settings.SettingApplication", cl);
+            XposedHelpers.findAndHookMethod(app, "onCreate", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) { registerWearSensor(p.thisObject); }
+            });
+            Object current = SettingApplication();
+            if (current != null) registerWearSensor(current);
+            XposedBridge.log(TAG + ": wear lifecycle hook installed");
+        } catch (Throwable t) { XposedBridge.log(TAG + ": wear lifecycle hook failed: " + t); }
+    }
+
+    private static synchronized void registerWearSensor(final Object context) {
+        try {
+            if (sProximityListener != null) return;
+            Object manager = context.getClass().getMethod("getSystemService", String.class).invoke(context, "sensor");
+            Class<?> sensorClass = Class.forName("android.hardware.Sensor");
+            Object sensor = manager.getClass().getMethod("getDefaultSensor", int.class).invoke(manager, 8);
+            if (sensor == null) throw new IllegalStateException("proximity sensor unavailable");
+            final float maxRange = ((Float) sensorClass.getMethod("getMaximumRange").invoke(sensor)).floatValue();
+            final Class<?> listenerClass = Class.forName("android.hardware.SensorEventListener");
+            Object listener = Proxy.newProxyInstance(listenerClass.getClassLoader(), new Class<?>[]{listenerClass}, new InvocationHandler() {
+                @Override public Object invoke(Object proxy, Method method, Object[] args) {
+                    String name = method.getName();
+                    if ("onSensorChanged".equals(name) && args != null && args.length == 1) {
+                        try {
+                            float[] values = (float[]) args[0].getClass().getField("values").get(args[0]);
+                            if (values != null && values.length > 0) onWearState(context, values[0] < maxRange);
+                        } catch (Throwable t) { XposedBridge.log(TAG + ": proximity event failed: " + t); }
+                    }
+                    if ("hashCode".equals(name)) return Integer.valueOf(System.identityHashCode(proxy));
+                    if ("equals".equals(name)) return Boolean.valueOf(args != null && args.length == 1 && proxy == args[0]);
+                    if ("toString".equals(name)) return TAG + "ProximityListener";
+                    return null;
+                }
+            });
+            boolean registered = ((Boolean) manager.getClass().getMethod("registerListener", listenerClass, sensorClass, int.class)
+                    .invoke(manager, listener, sensor, 3)).booleanValue();
+            if (!registered) throw new IllegalStateException("proximity listener rejected");
+            sAppContext = context;
+            sSensorManager = manager;
+            sProximityListener = listener;
+            int savedWorn = getGlobalInt(context, WORN_KEY, -1);
+            if (savedWorn == 0) {
+                onWearState(context, false);
+            } else {
+                if (savedWorn == 1) putGlobalString(context, REMOVED_AT_KEY, "");
+                releaseWakeLock();
+                XposedBridge.log(TAG + ": current wear state unavailable; deferring to the native proximity policy");
+            }
+            XposedBridge.log(TAG + ": proximity listener registered maxRange=" + maxRange + " savedWorn=" + savedWorn);
+        } catch (Throwable t) { XposedBridge.log(TAG + ": proximity registration failed: " + t); }
+    }
+
+    private static synchronized void onWearState(final Object context, boolean worn) {
+        if (sWearKnown && sWorn == worn) {
+            if (worn && (!isEnabled(context) || sWakeLock != null)) return;
+            if (!worn && (!isEnabled(context) || sPendingSleep != null)) return;
+        }
+        sWearKnown = true;
+        sWorn = worn;
+        putGlobalInt(context, WORN_KEY, worn ? 1 : 0);
+        cancelPendingSleep();
+        if (worn) {
+            putGlobalString(context, REMOVED_AT_KEY, "");
+            if (isEnabled(context)) acquireWakeLock(context);
+            XposedBridge.log(TAG + ": headset worn; pending sleep cancelled");
+            return;
+        }
+        if (!isEnabled(context)) return;
+        long removedAt = parseLong(getGlobalString(context, REMOVED_AT_KEY), 0L);
+        long now = System.currentTimeMillis();
+        if (removedAt <= 0L || removedAt > now) {
+            removedAt = now;
+            putGlobalString(context, REMOVED_AT_KEY, String.valueOf(removedAt));
+        }
+        final long delay = remainingSleepDelay(now, removedAt);
+        sPendingSleep = SLEEP_EXECUTOR.schedule(new Runnable() {
+            @Override public void run() {
+                synchronized (VSleepHook.class) {
+                    if (sWorn || !isEnabled(context)) return;
+                    sPendingSleep = null;
+                    releaseWakeLock();
+                    requestSleep(context);
+                }
+            }
+        }, delay, TimeUnit.MILLISECONDS);
+        XposedBridge.log(TAG + ": headset removed; sleep scheduled in " + (delay / 1000L) + " seconds");
+    }
+
+    private static synchronized void cancelPendingSleep() {
+        ScheduledFuture pending = sPendingSleep;
+        sPendingSleep = null;
+        if (pending != null) pending.cancel(false);
+    }
+
+    private static void requestSleep(Object context) {
+        try {
+            Object pm = context.getClass().getMethod("getSystemService", String.class).invoke(context, "power");
+            long now = ((Long) Class.forName("android.os.SystemClock").getMethod("uptimeMillis").invoke(null)).longValue();
+            pm.getClass().getMethod("goToSleep", long.class).invoke(pm, Long.valueOf(now));
+            XposedBridge.log(TAG + ": headset remained removed; requested sleep");
+        } catch (Throwable t) { XposedBridge.log(TAG + ": sleep request failed: " + t); }
     }
 
     private static Object editableCallback(final Object original, Class<?> callback, final ClassLoader cl) {
@@ -101,22 +254,36 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static void addTileToEditor(List added, List more, ClassLoader cl) {
         try {
             Object context = SettingApplication();
-            List target = getGlobalInt(context, TILE_ADDED_KEY, 1) == 1 ? added : more;
+            int addedState = getGlobalInt(context, TILE_ADDED_KEY, 1);
+            List target = addedState == 1 ? added : more;
             if (hasType(target, V_SLEEP_TILE)) return;
-            target.add(newPanelItem(getGlobalInt(context, TILE_INDEX_KEY, target.size()), getGlobalInt(context, TILE_ADDED_KEY, 1), cl));
-            if (target == added) Collections.sort(added, new Comparator() { public int compare(Object a, Object b) { return panelIndex(a) - panelIndex(b); } });
+            int index = clampIndex(getGlobalInt(context, TILE_INDEX_KEY, target.size()), target.size());
+            Object template = !added.isEmpty() ? added.get(0) : (!more.isEmpty() ? more.get(0) : null);
+            if (template == null) throw new IllegalStateException("no stock shortcut is available as a resource template");
+            target.add(index, newPanelItem(index, addedState, panelName(template), panelIcon(template), cl));
         } catch (Throwable t) { XposedBridge.log(TAG + ": editor tile injection failed: " + t); }
     }
 
     private static void addTileToQuickSettings(ArrayList list, ClassLoader cl) {
         try {
             Object context = SettingApplication();
-            if (hasButtonInfoType(list, V_SLEEP_TILE)) return;
+            if (getGlobalInt(context, TILE_ADDED_KEY, 1) != 1 || hasButtonInfoType(list, V_SLEEP_TILE)) return;
             Class<?> info = XposedHelpers.findClass("com.picovr.quicksettings.button.QuickSettingButtonInfo", cl);
             Object item = info.newInstance();
             info.getMethod("m", int.class).invoke(item, V_SLEEP_TILE);
-            list.add(0, item);
+            int index = clampIndex(getGlobalInt(context, TILE_INDEX_KEY, 0), list.size());
+            list.add(index, item);
         } catch (Throwable t) { XposedBridge.log(TAG + ": quick tile list injection failed: " + t); }
+    }
+
+    static int clampIndex(int index, int size) {
+        if (index < 0) return 0;
+        return index > size ? size : index;
+    }
+
+    static long remainingSleepDelay(long now, long removedAt) {
+        long elapsed = now > removedAt ? now - removedAt : 0L;
+        return elapsed >= UNWORN_SLEEP_DELAY_MS ? 0L : UNWORN_SLEEP_DELAY_MS - elapsed;
     }
 
     private static void removeDuplicateTile(ArrayList list) {
@@ -130,32 +297,31 @@ public final class VSleepHook implements IXposedHookLoadPackage {
         } catch (Throwable t) { XposedBridge.log(TAG + ": duplicate tile cleanup failed: " + t); }
     }
 
-    private static void hookEditorLabels(ClassLoader cl) {
-        try {
-            final Class<?> added = XposedHelpers.findClass("com.picovr.adapters.QuickPanelAddedAdapter", cl);
-            final Class<?> more = XposedHelpers.findClass("com.picovr.adapters.QuickPanelMoreAdapter", cl);
-            Class<?> holderA = XposedHelpers.findClass("com.picovr.adapters.QuickPanelAddedAdapter$AddedHolder", cl);
-            Class<?> holderM = XposedHelpers.findClass("com.picovr.adapters.QuickPanelMoreAdapter$MoreHolder", cl);
-            XC_MethodHook label = new XC_MethodHook() { @Override protected void afterHookedMethod(MethodHookParam p) { setEditorLabel(p.args[0], p.thisObject, ((Integer) p.args[1]).intValue()); } };
-            XposedHelpers.findAndHookMethod(added, "m", holderA, int.class, label);
-            XposedHelpers.findAndHookMethod(more, "c", holderM, int.class, label);
-        } catch (Throwable t) { XposedBridge.log(TAG + ": editor label hooks failed: " + t); }
+    private static void hookEditorLabels(Class<?> added, Class<?> more, Class<?> holderA, Class<?> holderM) {
+        XC_MethodHook label = new XC_MethodHook() { @Override protected void afterHookedMethod(MethodHookParam p) { setEditorTile(p.args[0], p.thisObject, ((Integer) p.args[1]).intValue()); } };
+        XposedHelpers.findAndHookMethod(added, "m", holderA, int.class, label);
+        XposedHelpers.findAndHookMethod(more, "c", holderM, int.class, label);
     }
 
-    private static void setEditorLabel(Object holder, Object adapter, int position) {
+    private static void setEditorTile(Object holder, Object adapter, int position) {
         try {
             java.lang.reflect.Field data = adapter.getClass().getDeclaredField("b"); data.setAccessible(true);
             Object item = ((List) data.get(adapter)).get(position);
             if (panelType(item) != V_SLEEP_TILE) return;
-            java.lang.reflect.Field text = holder.getClass().getDeclaredField(holder.getClass().getName().contains("Added") ? "d" : "c");
+            boolean added = holder.getClass().getName().contains("Added");
+            java.lang.reflect.Field text = holder.getClass().getDeclaredField(added ? "d" : "c");
             text.setAccessible(true); Object label = text.get(holder);
-            label.getClass().getMethod("setText", CharSequence.class).invoke(label, "V-Sleep");
-        } catch (Throwable t) { XposedBridge.log(TAG + ": editor label failed: " + t); }
+            label.getClass().getMethod("setText", CharSequence.class).invoke(label, "V-Sleep Mode");
+            java.lang.reflect.Field image = holder.getClass().getDeclaredField(added ? "c" : "b");
+            image.setAccessible(true); Object imageView = image.get(holder);
+            Object drawable = moduleDrawable(SettingApplication());
+            if (drawable != null) imageView.getClass().getMethod("setImageDrawable", Class.forName("android.graphics.drawable.Drawable")).invoke(imageView, drawable);
+        } catch (Throwable t) { XposedBridge.log(TAG + ": editor tile binding failed: " + t); }
     }
 
     private static synchronized void configureSleepButton(Object adapter, Object holder, int position) {
         try {
-            if (position != 0) return;
+            if (!isButtonInfoTypeAt(adapter, position, V_SLEEP_TILE)) return;
             java.lang.reflect.Field buttonField = holder.getClass().getDeclaredField("a");
             buttonField.setAccessible(true);
             Object button = buttonField.get(holder);
@@ -180,15 +346,37 @@ public final class VSleepHook implements IXposedHookLoadPackage {
         } catch (Throwable t) { XposedBridge.log(TAG + ": quick tile configuration failed: " + t); }
     }
 
-    private static void mapSleepTypeForBind(Object adapter, int position) { setSleepType(adapter, position, V_SLEEP_TILE, 1); }
-    private static void restoreSleepTypeAfterBind(Object adapter, int position) { setSleepType(adapter, position, 1, V_SLEEP_TILE); }
-    private static void setSleepType(Object adapter, int position, int expected, int replacement) {
+    private static void mapSleepTypeForBind(Object adapter, int position) {
+        MAPPED_BIND_ITEM.remove();
         try {
-            if (position != 0) return;
-            java.lang.reflect.Field data = adapter.getClass().getDeclaredField("a"); data.setAccessible(true);
-            Object info = ((List) data.get(adapter)).get(position);
-            if (((Integer) info.getClass().getMethod("f").invoke(info)).intValue() == expected) info.getClass().getMethod("m", int.class).invoke(info, replacement);
+            Object info = buttonInfoAt(adapter, position);
+            if (buttonInfoType(info) != V_SLEEP_TILE) return;
+            info.getClass().getMethod("m", int.class).invoke(info, 1);
+            MAPPED_BIND_ITEM.set(info);
         } catch (Throwable t) { XposedBridge.log(TAG + ": tile bind mapping failed: " + t); }
+    }
+    private static void restoreSleepTypeAfterBind(Object adapter, int position) {
+        Object info = MAPPED_BIND_ITEM.get();
+        MAPPED_BIND_ITEM.remove();
+        if (info == null) return;
+        try { info.getClass().getMethod("m", int.class).invoke(info, V_SLEEP_TILE); }
+        catch (Throwable t) { XposedBridge.log(TAG + ": tile bind restoration failed: " + t); }
+    }
+    private static Object buttonInfoAt(Object adapter, int position) throws Exception {
+        java.lang.reflect.Field data = adapter.getClass().getDeclaredField("a");
+        data.setAccessible(true);
+        List list = (List) data.get(adapter);
+        if (position < 0 || position >= list.size()) return null;
+        return list.get(position);
+    }
+    private static int buttonInfoType(Object info) throws Exception {
+        return info == null ? -1 : ((Integer) info.getClass().getMethod("f").invoke(info)).intValue();
+    }
+    private static boolean isButtonInfoTypeAt(Object adapter, int position, int type) {
+        try {
+            Object mapped = MAPPED_BIND_ITEM.get();
+            return mapped != null ? mapped == buttonInfoAt(adapter, position) : buttonInfoType(buttonInfoAt(adapter, position)) == type;
+        } catch (Throwable t) { return false; }
     }
 
     private static List saveTileEdit(List list) {
@@ -209,15 +397,17 @@ public final class VSleepHook implements IXposedHookLoadPackage {
         return list;
     }
 
-    private static Object newPanelItem(int index, int added, ClassLoader cl) throws Exception {
+    private static Object newPanelItem(int index, int added, int name, int icon, ClassLoader cl) throws Exception {
         Class<?> item = XposedHelpers.findClass("com.picovr.database.quickpanel.QuickPanelItem", cl);
-        int icon = moduleIcon(SettingApplication());
-        return item.getConstructor(int.class, int.class, int.class, int.class, int.class, String.class).newInstance(V_SLEEP_TILE, index, added, 0, icon, "vsleep");
+        return item.getConstructor(int.class, int.class, int.class, int.class, int.class, String.class)
+                .newInstance(V_SLEEP_TILE, index, added, name, icon, "vsleep");
     }
     private static boolean hasType(List list, int type) { for (Object item : list) if (panelType(item) == type) return true; return false; }
     private static boolean hasButtonInfoType(List list, int type) { try { for (Object item : list) if (((Integer) item.getClass().getMethod("f").invoke(item)).intValue() == type) return true; } catch (Throwable ignored) {} return false; }
     private static int panelType(Object item) { try { return ((Integer) item.getClass().getMethod("f").invoke(item)).intValue(); } catch (Throwable t) { return -1; } }
     private static int panelIndex(Object item) { try { return ((Integer) item.getClass().getMethod("d").invoke(item)).intValue(); } catch (Throwable t) { return 0; } }
+    private static int panelName(Object item) { try { return ((Integer) item.getClass().getMethod("e").invoke(item)).intValue(); } catch (Throwable t) { return 0; } }
+    private static int panelIcon(Object item) { try { return ((Integer) item.getClass().getMethod("b").invoke(item)).intValue(); } catch (Throwable t) { return 0; } }
     private static boolean panelAdded(Object item) { try { return ((Boolean) item.getClass().getMethod("g").invoke(item)).booleanValue(); } catch (Throwable t) { return false; } }
     private static Object SettingApplication() throws Exception {
         return Class.forName("android.app.ActivityThread").getMethod("currentApplication").invoke(null);
@@ -295,32 +485,41 @@ public final class VSleepHook implements IXposedHookLoadPackage {
             return;
         }
         advanceGeneration(c);
-        acquireWakeLock(c);
+        if (sWearKnown) onWearState(c, sWorn);
+        else XposedBridge.log(TAG + ": V-Sleep enabled with native proximity policy until wear state is known");
         XposedBridge.log(TAG + ": V-Sleep enabled under shared coordination");
     }
 
     private static synchronized void disable(Object c) {
-        if (!hasSnapshot(c) && !hasCoordSnapshot(c) && !migrateLegacySnapshot(c)) {
-            XposedBridge.log(TAG + ": V-Sleep disable aborted: no valid snapshot is available");
-            return;
+        cancelPendingSleep();
+        putGlobalString(c, REMOVED_AT_KEY, "");
+        try {
+            if (!hasSnapshot(c) && !hasCoordSnapshot(c) && !migrateLegacySnapshot(c)) {
+                XposedBridge.log(TAG + ": V-Sleep disable aborted: no valid snapshot is available");
+                return;
+            }
+            Snapshot snapshot = readSnapshot(c);
+            if (snapshot == null) {
+                XposedBridge.log(TAG + ": V-Sleep disable aborted: snapshot is incomplete");
+                return;
+            }
+            if (!restoreSnapshot(c, snapshot)) {
+                XposedBridge.log(TAG + ": V-Sleep exit failed; keeping active transaction for retry");
+                return;
+            }
+            boolean cleaned = putGlobalInt(c, COORD_ACTIVE, 0);
+            cleaned = putGlobalInt(c, MODE_KEY, 0) && cleaned;
+            cleaned = clearSnapshot(c) && cleaned;
+            cleaned = clearCoordination(c) && cleaned;
+            if (!cleaned) {
+                XposedBridge.log(TAG + ": V-Sleep exit completed but transaction cleanup failed");
+                return;
+            }
+            advanceGeneration(c);
+            XposedBridge.log(TAG + ": V-Sleep disabled; restored pre-sleep baseline");
+        } finally {
+            releaseWakeLock();
         }
-        Snapshot snapshot = readSnapshot(c);
-        if (snapshot == null) {
-            XposedBridge.log(TAG + ": V-Sleep disable aborted: snapshot is incomplete");
-            return;
-        }
-        if (!restoreSnapshot(c, snapshot)) {
-            XposedBridge.log(TAG + ": V-Sleep exit failed; keeping active transaction for retry");
-            return;
-        }
-        if (!putGlobalInt(c, COORD_ACTIVE, 0) || !putGlobalInt(c, MODE_KEY, 0)
-                || !clearSnapshot(c) || !clearCoordination(c)) {
-            XposedBridge.log(TAG + ": V-Sleep exit completed but transaction cleanup failed");
-            return;
-        }
-        advanceGeneration(c);
-        releaseWakeLock();
-        XposedBridge.log(TAG + ": V-Sleep disabled; restored pre-sleep baseline");
     }
 
     private static synchronized void acquireWakeLock(Object c) {
@@ -328,18 +527,19 @@ public final class VSleepHook implements IXposedHookLoadPackage {
             if (sWakeLock != null) return;
             Object pm = c.getClass().getMethod("getSystemService", String.class).invoke(c, "power");
             Object wl = pm.getClass().getMethod("newWakeLock", int.class, String.class)
-                    .invoke(pm, 0x0000000a, TAG + ":WakeLock"); // SCREEN_DIM_WAKE_LOCK | ACQUIRE_CAUSES_WAKELOCK = 10
+                    .invoke(pm, 0x0000000a, TAG + ":WakeLock");
             wl.getClass().getMethod("acquire").invoke(wl);
             sWakeLock = wl;
-            XposedBridge.log(TAG + ": screen dim wakelock acquired");
+            XposedBridge.log(TAG + ": screen wakelock acquired while headset is worn");
         } catch (Throwable t) { XposedBridge.log(TAG + ": failed to acquire wakelock: " + t); }
     }
 
     private static synchronized void releaseWakeLock() {
+        Object wakeLock = sWakeLock;
+        sWakeLock = null;
+        if (wakeLock == null) return;
         try {
-            if (sWakeLock == null) return;
-            sWakeLock.getClass().getMethod("release").invoke(sWakeLock);
-            sWakeLock = null;
+            wakeLock.getClass().getMethod("release").invoke(wakeLock);
             XposedBridge.log(TAG + ": wakelock released");
         } catch (Throwable t) { XposedBridge.log(TAG + ": failed to release wakelock: " + t); }
     }
@@ -473,6 +673,7 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static boolean save(Object c, String s, String v) { try { Boolean written = (Boolean) Class.forName("android.provider.Settings$Global").getMethod("putString", Class.forName("android.content.ContentResolver"), String.class, String.class).invoke(null, resolver(c), SAVED_PREFIX + s, v); if (written.booleanValue() && v.equals(saved(c, s))) return true; XposedBridge.log(TAG + ": save verification failed " + s); } catch (Throwable t) { XposedBridge.log(TAG + ": save failed " + s + ": " + t); } return false; }
     private static String saved(Object c, String s) { try { return (String) Class.forName("android.provider.Settings$Global").getMethod("getString", Class.forName("android.content.ContentResolver"), String.class).invoke(null, resolver(c), SAVED_PREFIX + s); } catch (Throwable t) { XposedBridge.log(TAG + ": saved value read failed " + s + ": " + t); return null; } }
     private static int parseInt(String v, int d) { try { return Integer.parseInt(v); } catch (Throwable t) { return d; } }
+    private static long parseLong(String v, long d) { try { return Long.parseLong(v); } catch (Throwable t) { return d; } }
 
     private static Map readGovernors() {
         Map governors = new HashMap(); File[] policies = new File(CPU_POLICY_PATH).listFiles();

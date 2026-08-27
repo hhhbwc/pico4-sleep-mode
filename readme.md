@@ -23,12 +23,12 @@ PICO 4 的 LSPosed 模块：把一个 V-Sleep Mode 开关加入 Dock 右侧时�
 - 一键开启低功耗模式：眼缓冲 `1024 x 1024`、固定注视渲染（FFR）、亮度 `1`、CPU governor `powersave`。
 - 一键关闭并恢复开启前保存的眼缓冲、FFR、亮度和 CPU governor。
 - 已在实机连续开关测试，开启与恢复均有 LSPosed 日志记录。
+- 戴着头显时保持亮屏；摘下后等待 3 分钟再休眠，倒计时内重新戴上会取消休眠。
+- 支持在“设置 -> 通用 -> 快捷方式”中添加、移除和拖拽排序；模块条目不会写入 PICO 的 Room 数据库。
 
 ### 当前限制与计划
 
-- 仅在已 root 且安装 LSPosed / Zygisk-Vector 的 PICO 4 上验证；系统更新可能改变 Hook 目标。
-- 快捷格当前固定在快捷栏第一位。
-- 官方“设置 -> 通用 -> 快捷方式”的添加、删除和拖拽排序暂不支持。该固件的编辑链路与自定义项目不兼容，曾导致 Settings 崩溃，现已禁用以优先保证稳定。
+- 仅在已 root 且安装 LSPosed / Zygisk-Vector 的 PICO 4、系统版本 5.13.7 上验证；系统更新可能改变 Hook 目标。
 - 不会关闭 6DoF 追踪，也没有防误触逻辑。
 - 后续计划：可配置睡眠预设、兼容性诊断、长时间 VRChat V 睡的电量/温度/稳定性实测，以及固件兼容性矩阵。
 
@@ -37,7 +37,7 @@ PICO 4 的 LSPosed 模块：把一个 V-Sleep Mode 开关加入 Dock 右侧时�
 1. 安装 Release 提供的 `v-sleep-mode.apk`；自行构建时 APK 位于 `mod_vsleep/build/v-sleep-mode.apk`。
 2. 在 LSPosed / Zygisk-Vector 启用模块，作用域只选择 `com.picovr.settings`。
 3. 强制停止“设置”或重启头显。
-4. 点击 Dock 右侧时间/电源区域，V-Sleep Mode 位于二级面板底部快捷栏第一格。
+4. 在“设置 -> 通用 -> 快捷方式”中添加或排序 V-Sleep Mode，然后从 Dock 右侧时间/电源区域打开二级快捷设置面板。
 
 开启前先记录当前值，开启和关闭后均可检查：
 
@@ -70,12 +70,12 @@ I was about to V-sleep in VRChat. My power bank could not keep up with the heads
 - One-tap sleep mode: `1024 x 1024` eye buffer, FFR enabled, brightness `1`, and `powersave` CPU governor.
 - One-tap restoration of the eye buffer, FFR, brightness, and CPU governor saved before activation.
 - Repeated on-device toggle testing completed, with LSPosed logs for both activation and restoration.
+- The display stays awake while the headset is worn. Removing it starts a three-minute sleep timer; wearing it again cancels the timer.
+- The tile can be added, removed, and reordered under Settings -> General -> Shortcuts. Module metadata is never written to PICO's Room database.
 
 ### Limitations and roadmap
 
-- Tested only on rooted PICO 4 with LSPosed / Zygisk-Vector. Firmware updates can break the hooks.
-- The tile is currently fixed in the first Quick Settings slot.
-- The stock add/remove/reorder editor is disabled for now because this firmware's editor path crashes with custom items.
+- Tested only on rooted PICO 4 firmware 5.13.7 with LSPosed / Zygisk-Vector. Firmware updates can break the hooks.
 - No 6DoF disabling and no accidental-touch prevention.
 - Planned: configurable presets, compatibility diagnostics, long VRChat V-sleep power/temperature/stability tests, and a firmware compatibility matrix.
 
@@ -84,7 +84,7 @@ I was about to V-sleep in VRChat. My power bank could not keep up with the heads
 1. Install `v-sleep-mode.apk` from Releases, or build `mod_vsleep/build/v-sleep-mode.apk` yourself.
 2. Enable the module in LSPosed / Zygisk-Vector, scoped only to `com.picovr.settings`.
 3. Force-stop Settings or reboot the headset.
-4. Open the Dock time/power panel. V-Sleep Mode is the first tile in the lower Quick Settings row.
+4. Add or reorder V-Sleep Mode under Settings -> General -> Shortcuts, then open the secondary Quick Settings panel from the Dock time/power area.
 
 Before enabling, record the current values. Check after enabling and disabling:
 
@@ -117,12 +117,12 @@ CEST (UTC+2) `2026-08-14 22:20` и MSK (UTC+3) `2026-08-14 23:20`,<br>
 - Режим низкого энергопотребления одним нажатием: буфер глаз `1024 x 1024`, FFR, яркость `1`, governor CPU `powersave`.
 - Восстановление ранее сохранённых буфера глаз, FFR, яркости и governor CPU одним нажатием.
 - Выполнены повторные тесты переключения на устройстве; активация и восстановление записываются в журналы LSPosed.
+- Пока шлем надет, экран не гаснет. После снятия запускается таймер сна на три минуты; повторное надевание отменяет таймер.
+- Плитку можно добавлять, удалять и перемещать в «Настройки -> Общие -> Ярлыки»; данные модуля не записываются в базу Room PICO.
 
 ### Ограничения и планы
 
-- Проверено только на PICO 4 с root и LSPosed / Zygisk-Vector; обновление прошивки может сломать Hook.
-- Плитка сейчас закреплена на первом месте ряда быстрых настроек.
-- Добавление, удаление и перетаскивание в штатном редакторе временно отключены: эта прошивка аварийно завершает Settings при пользовательских элементах.
+- Проверено только на PICO 4 с прошивкой 5.13.7, root и LSPosed / Zygisk-Vector; обновление прошивки может сломать Hook.
 - Нет отключения 6DoF и защиты от случайных нажатий.
 - В планах: настраиваемые пресеты, диагностика совместимости, длительные тесты V-Sleep Mode в VRChat и таблица совместимости прошивок.
 
@@ -131,7 +131,7 @@ CEST (UTC+2) `2026-08-14 22:20` и MSK (UTC+3) `2026-08-14 23:20`,<br>
 1. Установите `v-sleep-mode.apk` из Releases или соберите `mod_vsleep/build/v-sleep-mode.apk` самостоятельно.
 2. Включите модуль в LSPosed / Zygisk-Vector только для `com.picovr.settings`.
 3. Принудительно остановите Settings или перезагрузите шлем.
-4. Откройте панель времени/питания в Dock. V-Sleep Mode будет первой плиткой нижнего ряда быстрых настроек.
+4. Добавьте или переместите V-Sleep Mode в «Настройки -> Общие -> Ярлыки», затем откройте вторичную панель быстрых настроек через область времени/питания Dock.
 
 ---
 
