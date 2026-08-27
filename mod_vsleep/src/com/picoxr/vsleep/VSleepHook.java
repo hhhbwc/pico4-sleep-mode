@@ -56,6 +56,7 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static final String COORD_EFFECTIVE_OWNER = COORD_PREFIX + "v2_effective_owner";
     private static final String COORD_PHASE = COORD_PREFIX + "v2_phase";
     private static final String COORD_ERROR = COORD_PREFIX + "v2_error";
+    private static final String PNS_VSLEEP_WAS_ENABLED = "pico_neversleep_vsleep_was_enabled";
     private static final int COORD_PROTOCOL_VERSION = 2;
     private static final long COORD_POLL_MS = 250L;
     private static final long UNWORN_SLEEP_DELAY_MS = TimeUnit.MINUTES.toMillis(3);
@@ -483,6 +484,10 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static boolean hasSnapshot(Object c) { return getGlobalInt(c, SNAPSHOT_KEY, 0) == 1; }
 
     private static synchronized void enable(Object c) {
+        if (getGlobalInt(c, "pvr_never_sleep_enabled", 0) == 1) {
+            XposedBridge.log(TAG + ": enable refused while PicoNeverSleep owns sleep policy");
+            return;
+        }
         if (isEnabled(c)) return;
         if (hasSnapshot(c) || hasCoordSnapshot(c)) {
             XposedBridge.log(TAG + ": refusing enable while a previous snapshot needs restoration");
@@ -680,7 +685,8 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     }
 
     private static synchronized void pollPowerRequest(Object c) {
-        if (!isEnabled(c) && !hasSnapshot(c) && !hasCoordSnapshot(c)) return;
+        if (!isEnabled(c) && !hasSnapshot(c) && !hasCoordSnapshot(c)
+                && getGlobalInt(c, PNS_VSLEEP_WAS_ENABLED, 0) != 1) return;
         CoordinationProtocol.Request request = CoordinationProtocol.parse(getGlobalString(c, COORD_REQUEST));
         if (request == null || !"power".equals(request.owner)) return;
         String ack = getGlobalString(c, COORD_ACK);
@@ -709,6 +715,8 @@ public final class VSleepHook implements IXposedHookLoadPackage {
         }
         CoordinationProtocol.Request latest = CoordinationProtocol.parse(getGlobalString(c, COORD_REQUEST));
         if (latest == null || !"power".equals(latest.owner)) return;
+        boolean restoreVSleep = "disable".equals(latest.payload)
+                && getGlobalInt(c, PNS_VSLEEP_WAS_ENABLED, 0) == 1;
         if (!putGlobalString(c, COORD_ACK, latest.raw)) {
             putGlobalString(c, COORD_PHASE, CoordinationProtocol.PHASE_ERROR);
             putGlobalString(c, COORD_ERROR, "确认失败");
@@ -716,6 +724,12 @@ public final class VSleepHook implements IXposedHookLoadPackage {
         }
         putGlobalString(c, COORD_EFFECTIVE_OWNER, "power:" + latest.payload);
         putGlobalString(c, COORD_PHASE, "idle");
+        if (restoreVSleep) {
+            putGlobalInt(c, PNS_VSLEEP_WAS_ENABLED, 0);
+            putGlobalString(c, COORD_REQUEST, "");
+            enable(c);
+            XposedBridge.log(TAG + ": restored V-Sleep after PicoNeverSleep release");
+        }
         postRefresh(c);
     }
 
