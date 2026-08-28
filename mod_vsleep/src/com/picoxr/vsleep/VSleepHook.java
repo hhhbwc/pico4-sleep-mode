@@ -43,6 +43,7 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static final String PROP_ENABLE_FFR = "persist.pvr.config.enable_ffr";
     private static final String PROP_FOVEATION = "persist.pvr.foveation.level";
     private static final String PROP_FPS = "persist.pvr.config.target_fps";
+    private static final String PROP_PROXIMITY_STATUS = "sys.pxr.psensor.status";
     private static final String MODULE_PACKAGE = "com.picoxr.vsleep";
     private static final String COORD_PREFIX = "pico_power_coord_";
     private static final String COORD_VERSION = COORD_PREFIX + "version";
@@ -59,6 +60,7 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static final String PNS_VSLEEP_WAS_ENABLED = "pico_neversleep_vsleep_was_enabled";
     private static final int COORD_PROTOCOL_VERSION = 2;
     private static final long COORD_POLL_MS = 250L;
+    private static final long WEAR_POLL_MS = TimeUnit.SECONDS.toMillis(5);
     private static final long UNWORN_SLEEP_DELAY_MS = TimeUnit.MINUTES.toMillis(3);
     private static final ScheduledExecutorService SLEEP_EXECUTOR = Executors.newSingleThreadScheduledExecutor();
     private static volatile Object sButton;
@@ -69,6 +71,7 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static volatile boolean sWearKnown;
     private static volatile boolean sWorn;
     private static volatile boolean sCoordinationPollStarted;
+    private static volatile boolean sWearPollStarted;
     private static final ThreadLocal MAPPED_BIND_ITEM = new ThreadLocal();
     private static Object sWakeLock;
 
@@ -142,12 +145,17 @@ public final class VSleepHook implements IXposedHookLoadPackage {
         try {
             Class<?> app = XposedHelpers.findClass("com.picovr.settings.SettingApplication", cl);
             XposedHelpers.findAndHookMethod(app, "onCreate", new XC_MethodHook() {
-                @Override protected void afterHookedMethod(MethodHookParam p) { registerWearSensor(p.thisObject); startCoordinationPoll(p.thisObject); }
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    registerWearSensor(p.thisObject);
+                    startCoordinationPoll(p.thisObject);
+                    startWearPoll(p.thisObject);
+                }
             });
             Object current = SettingApplication();
             if (current != null) {
                 registerWearSensor(current);
                 startCoordinationPoll(current);
+                startWearPoll(current);
             }
             XposedBridge.log(TAG + ": wear lifecycle hook installed");
         } catch (Throwable t) { XposedBridge.log(TAG + ": wear lifecycle hook failed: " + t); }
@@ -168,7 +176,12 @@ public final class VSleepHook implements IXposedHookLoadPackage {
                     if ("onSensorChanged".equals(name) && args != null && args.length == 1) {
                         try {
                             float[] values = (float[]) args[0].getClass().getField("values").get(args[0]);
-                            if (values != null && values.length > 0) onWearState(context, values[0] < maxRange);
+                            if (values != null && values.length > 0) {
+                                boolean worn = wearStateForProximity(values[0], maxRange);
+                                XposedBridge.log(TAG + ": proximity event value=" + values[0]
+                                        + " maxRange=" + maxRange + " worn=" + worn);
+                                onWearState(context, worn);
+                            }
                         } catch (Throwable t) { XposedBridge.log(TAG + ": proximity event failed: " + t); }
                     }
                     if ("hashCode".equals(name)) return Integer.valueOf(System.identityHashCode(proxy));
@@ -184,18 +197,25 @@ public final class VSleepHook implements IXposedHookLoadPackage {
             sSensorManager = manager;
             sProximityListener = listener;
             int savedWorn = getGlobalInt(context, WORN_KEY, -1);
-            if (savedWorn == 0) {
+            Boolean nativeWorn = readNativeWearState();
+            if (nativeWorn != null) {
+                XposedBridge.log(TAG + ": proximity bootstrap nativeWorn=" + nativeWorn
+                        + " savedWorn=" + savedWorn);
+                onWearState(context, nativeWorn.booleanValue());
+            } else if (savedWorn == 0) {
+                XposedBridge.log(TAG + ": proximity bootstrap uses saved removed state");
                 onWearState(context, false);
             } else {
-                if (savedWorn == 1) putGlobalString(context, REMOVED_AT_KEY, "");
                 releaseWakeLock();
-                XposedBridge.log(TAG + ": current wear state unavailable; deferring to the native proximity policy");
+                XposedBridge.log(TAG + ": proximity bootstrap unknown; awaiting sensor event savedWorn=" + savedWorn);
             }
             XposedBridge.log(TAG + ": proximity listener registered maxRange=" + maxRange + " savedWorn=" + savedWorn);
         } catch (Throwable t) { XposedBridge.log(TAG + ": proximity registration failed: " + t); }
     }
 
     private static synchronized void onWearState(final Object context, boolean worn) {
+        XposedBridge.log(TAG + ": wear state=" + (worn ? "worn" : "removed")
+                + " known=" + sWearKnown + " enabled=" + isEnabled(context));
         if (sWearKnown && sWorn == worn) {
             if (worn && (!isEnabled(context) || sWakeLock != null)) return;
             if (!worn && (!isEnabled(context) || sPendingSleep != null)) return;
@@ -235,6 +255,23 @@ public final class VSleepHook implements IXposedHookLoadPackage {
         ScheduledFuture pending = sPendingSleep;
         sPendingSleep = null;
         if (pending != null) pending.cancel(false);
+    }
+
+    static boolean wearStateForProximity(float value, float maxRange) {
+        return value >= maxRange;
+    }
+
+    static Boolean nativeWearState(String status) {
+        if ("0".equals(status)) return Boolean.FALSE;
+        if ("1".equals(status)) return Boolean.TRUE;
+        return null;
+    }
+
+    private static Boolean readNativeWearState() {
+        String status = getProp(PROP_PROXIMITY_STATUS);
+        Boolean worn = nativeWearState(status);
+        if (worn == null) XposedBridge.log(TAG + ": native proximity status unavailable: " + status);
+        return worn;
     }
 
     private static void requestSleep(Object context) {
@@ -682,6 +719,25 @@ public final class VSleepHook implements IXposedHookLoadPackage {
         SLEEP_EXECUTOR.scheduleWithFixedDelay(new Runnable() {
             @Override public void run() { pollPowerRequest(c); }
         }, COORD_POLL_MS, COORD_POLL_MS, TimeUnit.MILLISECONDS);
+    }
+
+    private static synchronized void startWearPoll(final Object context) {
+        if (sWearPollStarted) return;
+        sWearPollStarted = true;
+        SLEEP_EXECUTOR.scheduleWithFixedDelay(new Runnable() {
+            @Override public void run() {
+                try {
+                    if (!isEnabled(context)) return;
+                    Boolean nativeWorn = readNativeWearState();
+                    if (nativeWorn != null && (!sWearKnown || sWorn != nativeWorn.booleanValue())) {
+                        XposedBridge.log(TAG + ": proximity poll state=" + nativeWorn);
+                        onWearState(context, nativeWorn.booleanValue());
+                    }
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + ": proximity poll failed: " + t);
+                }
+            }
+        }, WEAR_POLL_MS, WEAR_POLL_MS, TimeUnit.MILLISECONDS);
     }
 
     private static synchronized void pollPowerRequest(Object c) {

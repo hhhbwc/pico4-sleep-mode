@@ -27,6 +27,13 @@ public final class VSleepHookTest {
         assertTrue(!CoordinationProtocol.effectiveUiEnabled("vsleep", "restoring", true));
         assertTrue(!CoordinationProtocol.effectiveUiEnabled("vsleep", "active", false));
 
+        assertTrue(!VSleepHook.wearStateForProximity(0.0f, 5.0f));
+        assertTrue(VSleepHook.wearStateForProximity(5.0f, 5.0f));
+        assertTrue(Boolean.FALSE.equals(VSleepHook.nativeWearState("0")));
+        assertTrue(Boolean.TRUE.equals(VSleepHook.nativeWearState("1")));
+        assertTrue(VSleepHook.nativeWearState("") == null);
+        assertTrue(VSleepHook.nativeWearState("unknown") == null);
+
         System.out.println("VSleepHookTest passed");
         System.exit(0);
     }
