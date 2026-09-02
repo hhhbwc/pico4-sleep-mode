@@ -26,7 +26,9 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public final class VSleepHook implements IXposedHookLoadPackage {
     private static final String TAG = "PicoVSleep";
     private static final String SETTINGS_PACKAGE = "com.picovr.settings";
+    private static final String MATRIX_PACKAGE = "com.bytedance.pico.matrix";
     private static final int SLEEP_EYEBUFFER = 1024;
+    private static final int SLEEP_BRIGHTNESS = 10;
     private static final int V_SLEEP_TILE = 9001;
     private static final String MODE_KEY = "pico_vsleep_enabled";
     private static final String TILE_ADDED_KEY = "pico_vsleep_quick_added";
@@ -57,6 +59,8 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static final String COORD_EFFECTIVE_OWNER = COORD_PREFIX + "v2_effective_owner";
     private static final String COORD_PHASE = COORD_PREFIX + "v2_phase";
     private static final String COORD_ERROR = COORD_PREFIX + "v2_error";
+    private static final String MATRIX_STATE = "pico_matrix_coord_state";
+    private static final String MATRIX_STATE_TRANSITIONING = "transitioning";
     private static final String PNS_VSLEEP_WAS_ENABLED = "pico_neversleep_vsleep_was_enabled";
     private static final int COORD_PROTOCOL_VERSION = 2;
     private static final long COORD_POLL_MS = 250L;
@@ -78,6 +82,10 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     private static Object sWakeLock;
 
     @Override public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lp) {
+        if (MATRIX_PACKAGE.equals(lp.packageName)) {
+            installMatrixDiagnostics(lp.classLoader);
+            return;
+        }
         if (!SETTINGS_PACKAGE.equals(lp.packageName)) return;
         XposedBridge.log(TAG + ": loading in Quick Settings " + lp.packageName);
         try {
@@ -107,6 +115,25 @@ public final class VSleepHook implements IXposedHookLoadPackage {
             installWearLifecycleHook(lp.classLoader);
             XposedBridge.log(TAG + ": quick-settings hooks installed");
         } catch (Throwable t) { XposedBridge.log(TAG + ": failed to hook quick-settings adapter: " + t); }
+    }
+
+    private static void installMatrixDiagnostics(final ClassLoader cl) {
+        try {
+            final Class<?> signatures = XposedHelpers.findClass("com.bytedance.pico.base.e.a.j", cl);
+            XposedHelpers.findAndHookMethod(signatures, "a", Class.forName("android.content.Context", false, cl), String.class, new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    XposedBridge.log(TAG + ": Matrix signature package=" + String.valueOf(p.args[1]) + " value=" + String.valueOf(p.getResult()));
+                }
+            });
+            XposedHelpers.findAndHookMethod(signatures, "a", List.class, new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    XposedBridge.log(TAG + ": Matrix signature list=" + String.valueOf(p.getResult()));
+                }
+            });
+            XposedBridge.log(TAG + ": Matrix signature diagnostics installed");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": Matrix signature diagnostics unavailable: " + t);
+        }
     }
 
     private static void installEditorHooks(final ClassLoader cl) {
@@ -278,12 +305,12 @@ public final class VSleepHook implements IXposedHookLoadPackage {
     }
 
     static boolean wearStateForProximity(float value, float maxRange) {
-        return value >= maxRange;
+        return value < maxRange;
     }
 
     static Boolean nativeWearState(String status) {
-        if ("0".equals(status)) return Boolean.FALSE;
-        if ("1".equals(status)) return Boolean.TRUE;
+        if ("0".equals(status)) return Boolean.TRUE;
+        if ("1".equals(status)) return Boolean.FALSE;
         return null;
     }
 
@@ -546,20 +573,24 @@ public final class VSleepHook implements IXposedHookLoadPackage {
             return;
         }
         if (isEnabled(c)) return;
+        if (MATRIX_STATE_TRANSITIONING.equals(getGlobalString(c, MATRIX_STATE))) {
+            XposedBridge.log(TAG + ": enable deferred while Matrix region switch is in progress");
+            return;
+        }
         if (hasSnapshot(c) || hasCoordSnapshot(c)) {
             XposedBridge.log(TAG + ": refusing enable while a previous snapshot needs restoration");
             return;
         }
         String token = newToken();
         String request = CoordinationProtocol.request(token, "vsleep", "enable");
-        if (request == null || !putGlobalString(c, COORD_REQUEST, request)) return;
-        if (!isLatestRequest(c, request)) return;
+        if (request == null || !putGlobalString(c, COORD_REQUEST, request)) { return; }
+        if (!isLatestRequest(c, request)) { return; }
         Snapshot snapshot = captureSnapshot(c);
         if (snapshot == null || !saveSnapshot(c, snapshot) || !beginCoordination(c)) {
             putGlobalString(c, COORD_ERROR, "\u5feb\u7167\u5931\u8d25");
             return;
         }
-        if (!isLatestRequest(c, request) || hasPowerRequest(c, request)) return;
+        if (!isLatestRequest(c, request) || hasPowerRequest(c, request)) { return; }
         if (!applySleepState(c, snapshot.governors)) {
             putGlobalString(c, COORD_PHASE, CoordinationProtocol.PHASE_ERROR);
             return;
@@ -700,7 +731,7 @@ public final class VSleepHook implements IXposedHookLoadPackage {
         boolean applied = setProp(PROP_EYEBUFFER_W, String.valueOf(SLEEP_EYEBUFFER));
         applied = setProp(PROP_EYEBUFFER_H, String.valueOf(SLEEP_EYEBUFFER)) && applied;
         applied = setProp(PROP_FFR, "1") && applied;
-        applied = putSystemInt(c, "screen_brightness", 1) && applied;
+        applied = putSystemInt(c, "screen_brightness", SLEEP_BRIGHTNESS) && applied;
         return setGovernors(governorsWithValue(originalGovernors, "powersave")) && applied;
     }
 

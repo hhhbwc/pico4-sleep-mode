@@ -3,5 +3,6 @@
     <!-- The panel opened from Dock's time block. -->
     <string-array name="xposedscope">
         <item>com.picovr.settings</item>
+        <item>com.bytedance.pico.matrix</item>
     </string-array>
 </resources>

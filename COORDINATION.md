@@ -24,6 +24,23 @@ Settings 进程重启后，启动轮询会根据持久化快照和最新 power r
 
 事务记录 eye-buffer 宽高、FFR、enable_ffr、foveation.level、精确 FPS（含空值）、亮度和每个 CPU policy 的 governor。升级读取旧 v1 事务时，v1 未管理的两项属性使用当时仍未被模块修改的 live 值。`pico_power_coord_snapshot_valid=1` 表示恢复仍待完成。硬件状态不会用猜测的默认值替换。快捷面板编辑继续隔离 Room，仅保存模块自己的全局设置。
 
+## Matrix region-switch handoff
+
+Matrix region switching is a package transition and requires the same display/power quiescence as other system changes. The Matrix module sets the Global setting `pico_matrix_coord_state=transitioning` before its transition and removes it when finished. V-Sleep refuses to start a new transaction while this value is `transitioning`.
+
+When V-Sleep is active, Matrix publishes `2|token|power|matrix-switch` to `pico_power_coord_v2_request`. The existing V-Sleep poll restores the saved display/CPU snapshot, releases the wakelock, clears `sleep_active` and `snapshot_valid`, acknowledges the exact request, and enters `idle`. Matrix waits for that acknowledgement before downloading or installing the APK. A timeout or `error` phase leaves the user-visible state unchanged and must be investigated rather than clearing snapshot settings manually.
+
+Diagnostics:
+
+```sh
+settings get global pico_matrix_coord_state
+settings get global pico_power_coord_v2_phase
+settings get global pico_power_coord_sleep_active
+settings get global pico_power_coord_snapshot_valid
+settings get global pico_power_coord_v2_request
+settings get global pico_power_coord_v2_ack
+```
+
 ## Validation
 
 协议纯 Java 判断逻辑位于 `CoordinationProtocol.java`，测试覆盖非法解析、token 精确匹配、later request wins 和 effective UI 判定；原有排序、佩戴传感器、180 秒睡眠延迟测试保持有效。目标设备为 PICO 4 A8110 firmware `5.13.7`，需验证每个 Power Mode 等级、active 状态下请求、刷新 Settings 以及进程重启恢复。
