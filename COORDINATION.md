@@ -18,7 +18,7 @@ V-Sleep enable 先发布 `owner=vsleep` 请求。只有请求仍为最新、且�
 
 当 V-Sleep active 或存在快照时发现最新 `owner=power` 请求，立即关闭有效 UI、取消睡眠计时、释放 wakelock，恢复私有和协调快照，并完整清理事务；只有清理完成后才 ack 当前最新 power request。轮询使用已有单线程 executor。新请求覆盖旧请求时只处理最新请求，不重复恢复旧快照。
 
-Settings 进程重启后，启动轮询会根据持久化快照和最新 power request 继续恢复交接。UI 不仅检查 `pico_vsleep_enabled`，只有 `effective_owner=vsleep`、`phase=active` 且 committed 状态才显示开启；`restoring` / `error` 显示中文短提示并关闭开启边框。
+Settings 进程重启后，启动轮询会根据持久化快照和最新 power request 继续恢复交接。UI 不仅检查 `pico_vsleep_enabled`，还要求 `effective_owner=vsleep`、`phase=active` 且 committed 状态才显示开启；`restoring` / `error` 显示中文短提示并关闭开启边框。
 
 ## Stored state
 
